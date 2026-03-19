@@ -1,8 +1,11 @@
 import Anthropic from "@anthropic-ai/sdk";
 import type { AgentState, ToolRegistry } from "./types.js";
 import type { Logger } from "./logging.js";
+import type { TokenStore } from "./auth/token-store.js";
 
 const MAX_ITERATIONS = 20;
+const OAUTH_BETAS = "oauth-2025-04-20,claude-code-20250219,interleaved-thinking-2025-05-14,fine-grained-tool-streaming-2025-05-14";
+const OAUTH_SYSTEM_PREFIX = "You are Claude Code, Anthropic's official CLI for Claude.";
 
 export interface LLMClient {
   run(userMessage: string, state: AgentState): Promise<string>;
@@ -13,8 +16,11 @@ export function createLLMClient(
   systemPrompt: string,
   toolRegistry: ToolRegistry,
   logger: Logger,
+  tokenStore?: TokenStore,
 ): LLMClient {
-  const client = new Anthropic();
+  // When using OAuth (Claude Max), we create a new client per call with a fresh token.
+  // When using API key, we reuse a single client.
+  const staticClient = tokenStore ? null : new Anthropic();
 
   return {
     async run(userMessage: string, state: AgentState): Promise<string> {
@@ -23,13 +29,27 @@ export function createLLMClient(
         { role: "user", content: statePrefix + userMessage },
       ];
 
+      const useOAuth = !!tokenStore;
+      const client = staticClient ?? new Anthropic({
+        authToken: await tokenStore!.getAccessToken(),
+        defaultHeaders: { "anthropic-beta": OAUTH_BETAS },
+      });
+
       for (let i = 0; i < MAX_ITERATIONS; i++) {
         logger.log("llm_call", { iteration: i, message_count: messages.length });
+
+        // OAuth requires system prompt to start with the Claude Code identity string
+        const system: Anthropic.MessageCreateParams["system"] = useOAuth
+          ? [
+              { type: "text", text: OAUTH_SYSTEM_PREFIX },
+              { type: "text", text: systemPrompt },
+            ]
+          : systemPrompt;
 
         const response = await client.messages.create({
           model,
           max_tokens: 4096,
-          system: systemPrompt,
+          system,
           tools: toolRegistry.definitions.length > 0 ? toolRegistry.definitions : undefined,
           messages,
         });
