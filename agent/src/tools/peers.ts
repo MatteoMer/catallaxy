@@ -1,12 +1,10 @@
-import type { PeerConfig, ToolDefinition, ToolResult, TaskResponse, Task } from "../types.js";
+import type { PeerConfig, ToolDefinition, ToolResult, TaskResponse } from "../types.js";
 import type { Logger } from "../logging.js";
-
-const POLL_INTERVAL_MS = 2000;
-const POLL_TIMEOUT_MS = 120_000;
 
 export function getPeerTools(
   peers: PeerConfig[],
   agentId: string,
+  selfUrl: string,
   logger: Logger,
 ): {
   definitions: ToolDefinition[];
@@ -19,7 +17,7 @@ export function getPeerTools(
     peerMap.set(toolName, peer);
     return {
       name: toolName,
-      description: `Send a message to ${peer.id}: ${peer.description}. The message should describe what you need from this peer.`,
+      description: `Send a task to ${peer.id}: ${peer.description}. The message should describe what you need from this peer. This is fire-and-forget: you'll get a confirmation that the task was sent, and ${peer.id} will message you back with the result when done.`,
       input_schema: {
         type: "object" as const,
         properties: {
@@ -41,7 +39,7 @@ export function getPeerTools(
       postRes = await fetch(`${peer.url}/message`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ from: agentId, content: input.message }),
+        body: JSON.stringify({ from: agentId, content: input.message, reply_url: selfUrl }),
       });
     } catch (err) {
       const msg = `Cannot reach peer ${peer.id} at ${peer.url}: ${err instanceof Error ? err.message : String(err)}`;
@@ -65,36 +63,8 @@ export function getPeerTools(
       return `Peer ${peer.id} did not return a task_id`;
     }
 
-    // Poll for completion
-    const deadline = Date.now() + POLL_TIMEOUT_MS;
-    while (Date.now() < deadline) {
-      await new Promise((resolve) => setTimeout(resolve, POLL_INTERVAL_MS));
-
-      let pollRes: Response;
-      try {
-        pollRes = await fetch(`${peer.url}/tasks/${task_id}`);
-      } catch {
-        continue;
-      }
-      if (!pollRes.ok) continue;
-
-      let task: Task;
-      try {
-        task = (await pollRes.json()) as Task;
-      } catch {
-        continue;
-      }
-      if (task.status === "completed") {
-        logger.log("peer_response", { peer_id: peer.id, task_id, result: task.result });
-        return task.result ?? "Task completed with no output";
-      }
-      if (task.status === "failed") {
-        logger.log("peer_error", { peer_id: peer.id, task_id, error: task.error });
-        return `Peer ${peer.id} failed: ${task.error}`;
-      }
-    }
-
-    return `Timeout waiting for ${peer.id} to complete task ${task_id}`;
+    logger.log("peer_delegated", { peer_id: peer.id, task_id });
+    return `Task sent to ${peer.id} (task_id: ${task_id}). They will message you back with the result.`;
   };
 
   return { definitions, dispatch };

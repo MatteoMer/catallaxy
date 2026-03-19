@@ -132,6 +132,7 @@ for (let i = 0; i < agents.length; i++) {
   const config = {
     id: agent.id,
     port: agent.port,
+    url: `http://${agent.id}:${agent.port}`,
     model: agent.model,
     tools: agent.tools,
     system_prompt: agent.system_prompt,
@@ -154,6 +155,7 @@ for (let i = 0; i < agents.length; i++) {
 const controlConfig = {
   id: "control",
   port: 4500,
+  url: "http://control:4500",
   model: "claude-sonnet-4-6",
   tools: ["web_search", "code_exec", "write_document"],
   system_prompt: "You are a generalist assistant. You can research, code, and write. Complete tasks independently.",

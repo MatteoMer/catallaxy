@@ -20,7 +20,7 @@ export function createServer(agent: Agent): Hono {
       return c.json({ error: "'content' must be a non-empty string" }, 400);
     }
 
-    const task = agent.enqueue(body.from, body.content);
+    const task = agent.enqueue(body.from, body.content, body.reply_url);
     return c.json({ task_id: task.id }, 202);
   });
 

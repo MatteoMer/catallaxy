@@ -11,6 +11,7 @@ export interface PeerConfig {
 export interface AgentConfig {
   id: string;
   port: number;
+  url: string;
   model: string;
   tools: string[];
   system_prompt: string;
@@ -29,6 +30,7 @@ export interface Task {
   status: TaskStatus;
   result?: string;
   error?: string;
+  reply_url?: string;
   created_at: string;
   updated_at: string;
 }
@@ -65,6 +67,7 @@ export interface ToolRegistry {
 export interface IncomingMessage {
   from: string;
   content: string;
+  reply_url?: string;
 }
 
 export interface TaskResponse {

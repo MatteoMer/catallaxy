@@ -4,7 +4,7 @@ import type { LLMClient } from "./llm.js";
 import type { Logger } from "./logging.js";
 
 export interface Agent {
-  enqueue(from: string, content: string): Task;
+  enqueue(from: string, content: string, replyUrl?: string): Task;
   getTask(id: string): Task | undefined;
   getState(): AgentState;
 }
@@ -16,6 +16,29 @@ export function createAgent(agentId: string, llm: LLMClient, logger: Logger): Ag
   };
 
   let processing = false;
+
+  async function sendReply(task: Task): Promise<void> {
+    if (!task.reply_url) return;
+
+    const content = task.status === "completed"
+      ? `Result from ${agentId} for your task (${task.id}): ${task.result}`
+      : `Error from ${agentId} for your task (${task.id}): ${task.error}`;
+
+    try {
+      await fetch(`${task.reply_url}/message`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ from: agentId, content }),
+      });
+      logger.log("reply_sent", { task_id: task.id, to: task.from, reply_url: task.reply_url });
+    } catch (err) {
+      logger.log("reply_error", {
+        task_id: task.id,
+        to: task.from,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
 
   async function processNext(): Promise<void> {
     if (processing) return;
@@ -40,6 +63,11 @@ export function createAgent(agentId: string, llm: LLMClient, logger: Logger): Ag
     } finally {
       next.updated_at = new Date().toISOString();
       processing = false;
+
+      sendReply(next).catch((err) => {
+        logger.log("reply_error", { task_id: next.id, error: String(err) });
+      });
+
       processNext().catch((err) => {
         logger.log("worker_error", { error: String(err) });
       });
@@ -47,12 +75,13 @@ export function createAgent(agentId: string, llm: LLMClient, logger: Logger): Ag
   }
 
   return {
-    enqueue(from: string, content: string): Task {
+    enqueue(from: string, content: string, replyUrl?: string): Task {
       const task: Task = {
         id: randomUUID(),
         from,
         content,
         status: "queued",
+        reply_url: replyUrl,
         created_at: new Date().toISOString(),
         updated_at: new Date().toISOString(),
       };
