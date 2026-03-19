@@ -2,6 +2,7 @@ export const EVENT_TYPES = [
   "task_started",
   "task_completed",
   "task_failed",
+  "task_enqueued",
   "bid_placed",
   "bid_accepted",
   "bid_rejected",
@@ -11,6 +12,14 @@ export const EVENT_TYPES = [
   "message_sent",
   "resource_allocated",
   "resource_released",
+  "llm_call",
+  "llm_response",
+  "tool_call",
+  "tool_result",
+  "peer_request",
+  "peer_response",
+  "peer_error",
+  "worker_error",
 ] as const;
 
 export type EventType = (typeof EVENT_TYPES)[number];

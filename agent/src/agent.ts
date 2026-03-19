@@ -26,17 +26,17 @@ export function createAgent(agentId: string, llm: LLMClient, logger: Logger): Ag
     processing = true;
     next.status = "running";
     next.updated_at = new Date().toISOString();
-    logger.log("task_start", { task_id: next.id, from: next.from });
+    logger.log("task_started", { task_id: next.id, from: next.from });
 
     try {
       const result = await llm.run(next.content, state);
       next.status = "completed";
       next.result = result;
-      logger.log("task_complete", { task_id: next.id });
+      logger.log("task_completed", { task_id: next.id });
     } catch (err) {
       next.status = "failed";
       next.error = err instanceof Error ? err.message : String(err);
-      logger.log("task_error", { task_id: next.id, error: next.error });
+      logger.log("task_failed", { task_id: next.id, error: next.error });
     } finally {
       next.updated_at = new Date().toISOString();
       processing = false;
@@ -57,7 +57,7 @@ export function createAgent(agentId: string, llm: LLMClient, logger: Logger): Ag
         updated_at: new Date().toISOString(),
       };
       state.tasks.push(task);
-      logger.log("task_enqueue", { task_id: task.id, from });
+      logger.log("task_enqueued", { task_id: task.id, from });
 
       processNext().catch((err) => {
         logger.log("worker_error", { error: String(err) });

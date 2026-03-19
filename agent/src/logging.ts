@@ -1,17 +1,19 @@
+import { randomUUID } from "node:crypto";
 import type { Event } from "./types.js";
 
 export interface Logger {
-  log(type: string, data: Record<string, unknown>): void;
+  log(eventType: string, data: Record<string, unknown>): void;
 }
 
 export function createLogger(agentId: string, eventServerUrl?: string): Logger {
   return {
-    log(type: string, data: Record<string, unknown>): void {
+    log(eventType: string, data: Record<string, unknown>): void {
       const event: Event = {
         agent_id: agentId,
-        type,
+        event_type: eventType,
         data,
         timestamp: new Date().toISOString(),
+        correlation_id: randomUUID(),
       };
 
       if (eventServerUrl) {

@@ -8,22 +8,23 @@ interface AgentDef {
   port: number;
   model: string;
   tools: string[];
+  role: string;
   system_prompt: string;
 }
 
 const agents: AgentDef[] = [
   // Research
-  { id: "alpha",   port: 4201, model: "claude-opus-4-6",             tools: ["web_search"],      system_prompt: "You are a research specialist. You find information, synthesize sources, and deliver concise answers. You can delegate tasks to peers." },
-  { id: "beta",    port: 4202, model: "claude-sonnet-4-6",           tools: ["web_search"],      system_prompt: "You are a research specialist. You find information, synthesize sources, and deliver concise answers. You can delegate tasks to peers." },
-  { id: "gamma",   port: 4203, model: "claude-haiku-4-5-20251001",   tools: ["web_search"],      system_prompt: "You are a research specialist. You find information, synthesize sources, and deliver concise answers. You can delegate tasks to peers." },
+  { id: "alpha",   port: 4201, model: "claude-opus-4-6",             tools: ["web_search"],      role: "research", system_prompt: "You are a research specialist. You find information, synthesize sources, and deliver concise answers. You can delegate tasks to peers." },
+  { id: "beta",    port: 4202, model: "claude-sonnet-4-6",           tools: ["web_search"],      role: "research", system_prompt: "You are a research specialist. You find information, synthesize sources, and deliver concise answers. You can delegate tasks to peers." },
+  { id: "gamma",   port: 4203, model: "claude-haiku-4-5-20251001",   tools: ["web_search"],      role: "research", system_prompt: "You are a research specialist. You find information, synthesize sources, and deliver concise answers. You can delegate tasks to peers." },
   // Coders
-  { id: "delta",   port: 4301, model: "claude-sonnet-4-6",           tools: ["code_exec"],       system_prompt: "You are a coding specialist. You write, debug, and review code. You can delegate tasks to peers." },
-  { id: "epsilon", port: 4302, model: "claude-opus-4-6",             tools: ["code_exec"],       system_prompt: "You are a coding specialist. You write, debug, and review code. You can delegate tasks to peers." },
-  { id: "zeta",    port: 4303, model: "claude-haiku-4-5-20251001",   tools: ["code_exec"],       system_prompt: "You are a coding specialist. You write, debug, and review code. You can delegate tasks to peers." },
+  { id: "delta",   port: 4301, model: "claude-sonnet-4-6",           tools: ["code_exec"],       role: "coding", system_prompt: "You are a coding specialist. You write, debug, and review code. You can delegate tasks to peers." },
+  { id: "epsilon", port: 4302, model: "claude-opus-4-6",             tools: ["code_exec"],       role: "coding", system_prompt: "You are a coding specialist. You write, debug, and review code. You can delegate tasks to peers." },
+  { id: "zeta",    port: 4303, model: "claude-haiku-4-5-20251001",   tools: ["code_exec"],       role: "coding", system_prompt: "You are a coding specialist. You write, debug, and review code. You can delegate tasks to peers." },
   // Writers
-  { id: "eta",     port: 4401, model: "claude-opus-4-6",             tools: ["write_document"],  system_prompt: "You are a writing specialist. You draft documents, reports, and prose. You can delegate tasks to peers." },
-  { id: "theta",   port: 4402, model: "claude-sonnet-4-6",           tools: ["write_document"],  system_prompt: "You are a writing specialist. You draft documents, reports, and prose. You can delegate tasks to peers." },
-  { id: "iota",    port: 4403, model: "claude-haiku-4-5-20251001",   tools: ["write_document"],  system_prompt: "You are a writing specialist. You draft documents, reports, and prose. You can delegate tasks to peers." },
+  { id: "eta",     port: 4401, model: "claude-opus-4-6",             tools: ["write_document"],  role: "writing", system_prompt: "You are a writing specialist. You draft documents, reports, and prose. You can delegate tasks to peers." },
+  { id: "theta",   port: 4402, model: "claude-sonnet-4-6",           tools: ["write_document"],  role: "writing", system_prompt: "You are a writing specialist. You draft documents, reports, and prose. You can delegate tasks to peers." },
+  { id: "iota",    port: 4403, model: "claude-haiku-4-5-20251001",   tools: ["write_document"],  role: "writing", system_prompt: "You are a writing specialist. You draft documents, reports, and prose. You can delegate tasks to peers." },
 ];
 
 const PEERS_PER_AGENT = 2;
@@ -93,6 +94,26 @@ function buildNetwork(n: number, peersPerAgent: number): Map<number, Set<number>
 
 const network = buildNetwork(agents.length, PEERS_PER_AGENT);
 
+// Build topology JSON for the dashboard
+const allAgentsDefs = [
+  ...agents.map((a, i) => ({
+    id: a.id,
+    port: a.port,
+    role: a.role,
+    tools: a.tools,
+    peers: Array.from(network.get(i)!).map(j => agents[j].id),
+  })),
+  {
+    id: "control",
+    port: 4500,
+    role: "control",
+    tools: ["web_search", "code_exec", "write_document"],
+    peers: [] as string[],
+  },
+];
+
+const topologyJson = JSON.stringify(allAgentsDefs);
+
 let yaml = `# Auto-generated by generate-compose.ts — do not edit by hand
 # Regenerate: npx tsx generate-compose.ts > docker-compose.yml
 
@@ -111,6 +132,8 @@ services:
       - "4100:4100"
     environment:
       PORT: "4100"
+      NETWORK_TOPOLOGY: >
+        ${topologyJson}
     volumes:
       - event-data:/app/data
     healthcheck:
@@ -169,6 +192,14 @@ yaml += `
     environment:
       AGENT_CONFIG: >
         ${JSON.stringify(controlConfig)}
+
+  dashboard:
+    build: ./dashboard
+    ports:
+      - "4000:4000"
+    depends_on:
+      event-server:
+        condition: service_healthy
 
 volumes:
   event-data:
