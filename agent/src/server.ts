@@ -36,6 +36,25 @@ export function createServer(agent: Agent, config: AgentConfig): Hono {
     return c.json({ task_id: task.id }, 202);
   });
 
+  // Free endpoint for operator/dashboard missions (no payment required)
+  app.post("/mission", async (c) => {
+    let body: IncomingMessage;
+    try {
+      body = await c.req.json<IncomingMessage>();
+    } catch {
+      return c.json({ error: "Invalid JSON body" }, 400);
+    }
+
+    if (typeof body.content !== "string" || !body.content) {
+      return c.json({ error: "'content' must be a non-empty string" }, 400);
+    }
+
+    const from = typeof body.from === "string" && body.from ? body.from : "operator";
+    const reward = typeof body.reward === "number" ? body.reward : 0;
+    const task = agent.enqueue(from, body.content, reward, body.reply_url);
+    return c.json({ task_id: task.id }, 202);
+  });
+
   app.get("/tasks/:id", (c) => {
     const task = agent.getTask(c.req.param("id"));
     if (!task) {

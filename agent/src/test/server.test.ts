@@ -20,12 +20,13 @@ const testConfig: AgentConfig = {
 function createMockAgent(): Agent {
   const tasks = new Map<string, Task>();
   return {
-    enqueue(from: string, content: string): Task {
+    enqueue(from: string, content: string, reward?: number): Task {
       const task: Task = {
         id: "task-123",
         from,
         content,
         status: "queued",
+        reward: reward ?? 0,
         created_at: new Date().toISOString(),
         updated_at: new Date().toISOString(),
       };
@@ -35,8 +36,11 @@ function createMockAgent(): Agent {
     getTask(id: string) {
       return tasks.get(id);
     },
+    listPending() {
+      return Array.from(tasks.values()).filter((t) => t.status === "queued");
+    },
     getState() {
-      return { agent_id: "test-agent", tasks: Array.from(tasks.values()) };
+      return { agent_id: "test-agent", pending_task_count: tasks.size };
     },
   };
 }

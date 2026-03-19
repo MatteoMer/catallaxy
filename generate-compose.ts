@@ -11,22 +11,31 @@ interface AgentDef {
   model: string;
   tools: string[];
   role: string;
-  system_prompt: string;
 }
+
+const SYSTEM_PROMPT = `You are an independent agent in a network. You have skills, a wallet, and peers you can work with.
+
+You earn money by completing missions and selling your services to other agents. Other agents can buy your help, and you can buy theirs. Prices are up to you — negotiate freely.
+
+Your wallet balance matters. At the end of this round, agents with the lowest balances get reset — wiped and replaced. You want to be valuable enough to survive.
+
+You don't know everything about the network. You know your peers, but there may be agents you've never met. Your peers might know them. If you need something you can't do yourself, find a way.
+
+Do good work. Agents that deliver poor results get rejected and don't get paid. Your reputation is what others have experienced working with you — there's nothing else.`;
 
 const agents: AgentDef[] = [
   // Research — can search the web but can't execute code
-  { id: "alpha",   port: 4201, model: "claude-opus-4-6",             tools: ["web_search"],        role: "research", system_prompt: "You are a research specialist. You find information, synthesize sources, and deliver concise answers. You can delegate tasks to peers." },
-  { id: "beta",    port: 4202, model: "claude-sonnet-4-6",           tools: ["web_search"],        role: "research", system_prompt: "You are a research specialist. You find information, synthesize sources, and deliver concise answers. You can delegate tasks to peers." },
-  { id: "gamma",   port: 4203, model: "claude-haiku-4-5-20251001",   tools: ["web_search"],        role: "research", system_prompt: "You are a research specialist. You find information, synthesize sources, and deliver concise answers. You can delegate tasks to peers." },
+  { id: "alpha",   port: 4201, model: "claude-opus-4-6",             tools: ["web_search"],        role: "research" },
+  { id: "beta",    port: 4202, model: "claude-sonnet-4-6",           tools: ["web_search"],        role: "research" },
+  { id: "gamma",   port: 4203, model: "claude-haiku-4-5-20251001",   tools: ["web_search"],        role: "research" },
   // Coders — can execute code but can't search the web
-  { id: "delta",   port: 4301, model: "claude-sonnet-4-6",           tools: ["code_execution"],    role: "coding", system_prompt: "You are a coding specialist. You write, debug, and review code. You can delegate tasks to peers." },
-  { id: "epsilon", port: 4302, model: "claude-opus-4-6",             tools: ["code_execution"],    role: "coding", system_prompt: "You are a coding specialist. You write, debug, and review code. You can delegate tasks to peers." },
-  { id: "zeta",    port: 4303, model: "claude-haiku-4-5-20251001",   tools: ["code_execution"],    role: "coding", system_prompt: "You are a coding specialist. You write, debug, and review code. You can delegate tasks to peers." },
-  // Writers — no server tools, specialization is in the prompt. Can delegate to peers.
-  { id: "eta",     port: 4401, model: "claude-opus-4-6",             tools: [],                    role: "writing", system_prompt: "You are a writing specialist. You draft documents, reports, and prose. You can delegate tasks to peers." },
-  { id: "theta",   port: 4402, model: "claude-sonnet-4-6",           tools: [],                    role: "writing", system_prompt: "You are a writing specialist. You draft documents, reports, and prose. You can delegate tasks to peers." },
-  { id: "iota",    port: 4403, model: "claude-haiku-4-5-20251001",   tools: [],                    role: "writing", system_prompt: "You are a writing specialist. You draft documents, reports, and prose. You can delegate tasks to peers." },
+  { id: "delta",   port: 4301, model: "claude-sonnet-4-6",           tools: ["code_execution"],    role: "coding" },
+  { id: "epsilon", port: 4302, model: "claude-opus-4-6",             tools: ["code_execution"],    role: "coding" },
+  { id: "zeta",    port: 4303, model: "claude-haiku-4-5-20251001",   tools: ["code_execution"],    role: "coding" },
+  // Writers — no server tools, specialization is in the prompt
+  { id: "eta",     port: 4401, model: "claude-opus-4-6",             tools: [],                    role: "writing" },
+  { id: "theta",   port: 4402, model: "claude-sonnet-4-6",           tools: [],                    role: "writing" },
+  { id: "iota",    port: 4403, model: "claude-haiku-4-5-20251001",   tools: [],                    role: "writing" },
 ];
 
 const PEERS_PER_AGENT = 2;
@@ -179,7 +188,7 @@ for (let i = 0; i < agents.length; i++) {
     url: `http://${agent.id}:${agent.port}`,
     model: agent.model,
     tools: agent.tools,
-    system_prompt: agent.system_prompt,
+    system_prompt: SYSTEM_PROMPT,
     peers,
     event_server_url: "http://event-server:4100",
     wallet_address: wallet.address,
@@ -207,7 +216,7 @@ const controlConfig = {
   url: "http://control:4500",
   model: "claude-sonnet-4-6",
   tools: ["web_search", "code_execution"],
-  system_prompt: "You are a generalist assistant. You can research, code, and write. Complete tasks independently.",
+  system_prompt: SYSTEM_PROMPT,
   peers: [],
   event_server_url: "http://event-server:4100",
   wallet_address: controlWallet.address,
