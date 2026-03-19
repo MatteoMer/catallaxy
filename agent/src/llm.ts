@@ -1,14 +1,22 @@
 import Anthropic from "@anthropic-ai/sdk";
-import type { AgentState, ToolRegistry } from "./types.js";
+import type { AgentState, ToolDefinition, ToolResult, ToolRegistry } from "./types.js";
 import type { Logger } from "./logging.js";
 import type { TokenStore } from "./auth/token-store.js";
 
 const MAX_ITERATIONS = 20;
+const SELECTION_MAX_ITERATIONS = 3;
 const OAUTH_BETAS = "oauth-2025-04-20,claude-code-20250219,interleaved-thinking-2025-05-14,fine-grained-tool-streaming-2025-05-14";
 const OAUTH_SYSTEM_PREFIX = "You are Claude Code, Anthropic's official CLI for Claude.";
 
+const SELECTION_SYSTEM_PROMPT = "You are an economic agent. Pick the most valuable task you can complete well given your specialization. Consider the reward and your ability to deliver quality output.";
+
 export interface LLMClient {
   run(userMessage: string, state: AgentState): Promise<string>;
+  selectTask(
+    queueSummary: string,
+    tools: ToolDefinition[],
+    dispatch: (name: string, input: Record<string, unknown>) => Promise<ToolResult>,
+  ): Promise<void>;
 }
 
 export function createLLMClient(
@@ -22,6 +30,97 @@ export function createLLMClient(
   // When using API key, we reuse a single client.
   const staticClient = tokenStore ? null : new Anthropic();
 
+  async function getClient(): Promise<Anthropic> {
+    if (staticClient) return staticClient;
+    return new Anthropic({
+      authToken: await tokenStore!.getAccessToken(),
+      defaultHeaders: { "anthropic-beta": OAUTH_BETAS },
+    });
+  }
+
+  const useOAuth = !!tokenStore;
+
+  function buildSystem(prompt: string): Anthropic.MessageCreateParams["system"] {
+    return useOAuth
+      ? [
+          { type: "text", text: OAUTH_SYSTEM_PREFIX },
+          { type: "text", text: prompt },
+        ]
+      : prompt;
+  }
+
+  async function toolLoop(
+    client: Anthropic,
+    system: Anthropic.MessageCreateParams["system"],
+    messages: Anthropic.MessageParam[],
+    tools: ToolDefinition[],
+    dispatch: (name: string, input: Record<string, unknown>) => Promise<ToolResult>,
+    maxIterations: number,
+    maxTokens: number,
+  ): Promise<string> {
+    for (let i = 0; i < maxIterations; i++) {
+      logger.log("llm_call", { iteration: i, message_count: messages.length });
+
+      const response = await client.messages.create({
+        model,
+        max_tokens: maxTokens,
+        system,
+        tools: tools.length > 0 ? tools : undefined,
+        messages,
+      });
+
+      logger.log("llm_response", {
+        stop_reason: response.stop_reason,
+        content_blocks: response.content.length,
+      });
+
+      if (response.stop_reason === "end_turn") {
+        const textBlocks = response.content.filter(
+          (b): b is Anthropic.TextBlock => b.type === "text",
+        );
+        return textBlocks.map((b) => b.text).join("\n") || "(no text output)";
+      }
+
+      if (response.stop_reason === "tool_use") {
+        const toolUseBlocks = response.content.filter(
+          (b): b is Anthropic.ToolUseBlock => b.type === "tool_use",
+        );
+
+        messages.push({ role: "assistant", content: response.content });
+
+        const toolResults: Anthropic.ToolResultBlockParam[] = [];
+        for (const toolUse of toolUseBlocks) {
+          try {
+            const result = await dispatch(
+              toolUse.name,
+              toolUse.input as Record<string, unknown>,
+            );
+            toolResults.push({ type: "tool_result", tool_use_id: toolUse.id, content: result });
+          } catch (err) {
+            const errorMsg = err instanceof Error ? err.message : String(err);
+            toolResults.push({
+              type: "tool_result",
+              tool_use_id: toolUse.id,
+              content: `Error: ${errorMsg}`,
+              is_error: true,
+            });
+          }
+        }
+
+        messages.push({ role: "user", content: toolResults });
+        continue;
+      }
+
+      const fallbackText = response.content
+        .filter((b): b is Anthropic.TextBlock => b.type === "text")
+        .map((b) => b.text)
+        .join("\n");
+      return fallbackText || `(stopped with reason: ${response.stop_reason})`;
+    }
+
+    return "(max tool-use iterations reached)";
+  }
+
   return {
     async run(userMessage: string, state: AgentState): Promise<string> {
       const statePrefix = `<agent_state>\n${JSON.stringify(state)}\n</agent_state>\n\n`;
@@ -29,86 +128,37 @@ export function createLLMClient(
         { role: "user", content: statePrefix + userMessage },
       ];
 
-      const useOAuth = !!tokenStore;
-      const client = staticClient ?? new Anthropic({
-        authToken: await tokenStore!.getAccessToken(),
-        defaultHeaders: { "anthropic-beta": OAUTH_BETAS },
-      });
+      const client = await getClient();
+      return toolLoop(
+        client,
+        buildSystem(systemPrompt),
+        messages,
+        toolRegistry.definitions,
+        toolRegistry.dispatch,
+        MAX_ITERATIONS,
+        4096,
+      );
+    },
 
-      for (let i = 0; i < MAX_ITERATIONS; i++) {
-        logger.log("llm_call", { iteration: i, message_count: messages.length });
+    async selectTask(
+      queueSummary: string,
+      tools: ToolDefinition[],
+      dispatch: (name: string, input: Record<string, unknown>) => Promise<ToolResult>,
+    ): Promise<void> {
+      const messages: Anthropic.MessageParam[] = [
+        { role: "user", content: queueSummary },
+      ];
 
-        // OAuth requires system prompt to start with the Claude Code identity string
-        const system: Anthropic.MessageCreateParams["system"] = useOAuth
-          ? [
-              { type: "text", text: OAUTH_SYSTEM_PREFIX },
-              { type: "text", text: systemPrompt },
-            ]
-          : systemPrompt;
-
-        const response = await client.messages.create({
-          model,
-          max_tokens: 4096,
-          system,
-          tools: toolRegistry.definitions.length > 0 ? toolRegistry.definitions : undefined,
-          messages,
-        });
-
-        logger.log("llm_response", {
-          stop_reason: response.stop_reason,
-          content_blocks: response.content.length,
-        });
-
-        // Extract text from response
-        if (response.stop_reason === "end_turn") {
-          const textBlocks = response.content.filter(
-            (b): b is Anthropic.TextBlock => b.type === "text",
-          );
-          return textBlocks.map((b) => b.text).join("\n") || "(no text output)";
-        }
-
-        // Handle tool use
-        if (response.stop_reason === "tool_use") {
-          const toolUseBlocks = response.content.filter(
-            (b): b is Anthropic.ToolUseBlock => b.type === "tool_use",
-          );
-
-          // Add assistant message with all content blocks
-          messages.push({ role: "assistant", content: response.content });
-
-          // Execute each tool and collect results
-          const toolResults: Anthropic.ToolResultBlockParam[] = [];
-          for (const toolUse of toolUseBlocks) {
-            try {
-              const result = await toolRegistry.dispatch(
-                toolUse.name,
-                toolUse.input as Record<string, unknown>,
-              );
-              toolResults.push({ type: "tool_result", tool_use_id: toolUse.id, content: result });
-            } catch (err) {
-              const errorMsg = err instanceof Error ? err.message : String(err);
-              toolResults.push({
-                type: "tool_result",
-                tool_use_id: toolUse.id,
-                content: `Error: ${errorMsg}`,
-                is_error: true,
-              });
-            }
-          }
-
-          messages.push({ role: "user", content: toolResults });
-          continue;
-        }
-
-        // Unknown stop reason — return whatever text we have
-        const fallbackText = response.content
-          .filter((b): b is Anthropic.TextBlock => b.type === "text")
-          .map((b) => b.text)
-          .join("\n");
-        return fallbackText || `(stopped with reason: ${response.stop_reason})`;
-      }
-
-      return "(max tool-use iterations reached)";
+      const client = await getClient();
+      await toolLoop(
+        client,
+        buildSystem(SELECTION_SYSTEM_PROMPT),
+        messages,
+        tools,
+        dispatch,
+        SELECTION_MAX_ITERATIONS,
+        1024,
+      );
     },
   };
 }

@@ -22,6 +22,7 @@ export function getPeerTools(
         type: "object" as const,
         properties: {
           message: { type: "string", description: "The message to send to the peer" },
+          reward: { type: "number", description: "The reward to offer for completing this task (in pathUSD). Higher rewards attract better effort." },
         },
         required: ["message"],
       },
@@ -39,7 +40,7 @@ export function getPeerTools(
       postRes = await fetch(`${peer.url}/message`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ from: agentId, content: input.message, reply_url: selfUrl }),
+        body: JSON.stringify({ from: agentId, content: input.message, reward: input.reward ?? 0, reply_url: selfUrl }),
       });
     } catch (err) {
       const msg = `Cannot reach peer ${peer.id} at ${peer.url}: ${err instanceof Error ? err.message : String(err)}`;

@@ -122,8 +122,6 @@ x-agent: &agent-base
   depends_on:
     event-server:
       condition: service_healthy
-  volumes:
-    - ~/.catallaxy/tokens.json:/root/.catallaxy/tokens.json:ro
 
 services:
   event-server:
@@ -168,6 +166,9 @@ for (let i = 0; i < agents.length; i++) {
     <<: *agent-base
     ports:
       - "${agent.port}:${agent.port}"
+    volumes:
+      - ${agent.id}-data:/app/data
+      - ~/.catallaxy/tokens.json:/root/.catallaxy/tokens.json:ro
     environment:
       AGENT_CONFIG: >
         ${JSON.stringify(config)}
@@ -191,6 +192,9 @@ yaml += `
     <<: *agent-base
     ports:
       - "4500:4500"
+    volumes:
+      - control-data:/app/data
+      - ~/.catallaxy/tokens.json:/root/.catallaxy/tokens.json:ro
     environment:
       AGENT_CONFIG: >
         ${JSON.stringify(controlConfig)}
@@ -205,6 +209,7 @@ yaml += `
 
 volumes:
   event-data:
+${[...agents.map(a => `  ${a.id}-data:`), '  control-data:'].join('\n')}
 `;
 
 console.log(yaml);
