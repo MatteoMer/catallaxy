@@ -59,8 +59,9 @@ export function createAgent(agentId: string, llm: LLMClient, logger: Logger): Ag
       state.tasks.push(task);
       logger.log("task_enqueue", { task_id: task.id, from });
 
-      // Trigger processing (non-blocking)
-      processNext();
+      processNext().catch((err) => {
+        logger.log("worker_error", { error: String(err) });
+      });
 
       return task;
     },

@@ -54,7 +54,16 @@ export function getPeerTools(
       return `Error contacting ${peer.id}: ${postRes.status} ${errorText}`;
     }
 
-    const { task_id } = (await postRes.json()) as TaskResponse;
+    let task_id: string;
+    try {
+      const json = (await postRes.json()) as TaskResponse;
+      task_id = json.task_id;
+    } catch {
+      return `Peer ${peer.id} returned invalid JSON on POST /message`;
+    }
+    if (!task_id) {
+      return `Peer ${peer.id} did not return a task_id`;
+    }
 
     // Poll for completion
     const deadline = Date.now() + POLL_TIMEOUT_MS;
@@ -69,7 +78,12 @@ export function getPeerTools(
       }
       if (!pollRes.ok) continue;
 
-      const task = (await pollRes.json()) as Task;
+      let task: Task;
+      try {
+        task = (await pollRes.json()) as Task;
+      } catch {
+        continue;
+      }
       if (task.status === "completed") {
         logger.log("peer_response", { peer_id: peer.id, task_id, result: task.result });
         return task.result ?? "Task completed with no output";

@@ -21,7 +21,7 @@ export function createToolRegistry(config: AgentConfig, logger: Logger): ToolReg
     } else if (peerNames.has(name)) {
       result = await peers.dispatch(name, input);
     } else {
-      result = `Unknown tool: ${name}`;
+      throw new Error(`Unknown tool: ${name}`);
     }
 
     logger.log("tool_result", { tool: name, result });

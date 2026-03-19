@@ -18,7 +18,7 @@ export function createLLMClient(
 
   return {
     async run(userMessage: string, state: AgentState): Promise<string> {
-      const statePrefix = `<agent_state>\n${JSON.stringify(state, null, 2)}\n</agent_state>\n\n`;
+      const statePrefix = `<agent_state>\n${JSON.stringify(state)}\n</agent_state>\n\n`;
       const messages: Anthropic.MessageParam[] = [
         { role: "user", content: statePrefix + userMessage },
       ];

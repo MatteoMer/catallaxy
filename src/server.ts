@@ -13,8 +13,11 @@ export function createServer(agent: Agent): Hono {
       return c.json({ error: "Invalid JSON body" }, 400);
     }
 
-    if (!body.from || !body.content) {
-      return c.json({ error: "Missing 'from' or 'content'" }, 400);
+    if (typeof body.from !== "string" || !body.from) {
+      return c.json({ error: "'from' must be a non-empty string" }, 400);
+    }
+    if (typeof body.content !== "string" || !body.content) {
+      return c.json({ error: "'content' must be a non-empty string" }, 400);
     }
 
     const task = agent.enqueue(body.from, body.content);
