@@ -28,6 +28,7 @@ export interface Task {
   from: string;
   content: string;
   status: TaskStatus;
+  reward: number;
   result?: string;
   error?: string;
   reply_url?: string;
@@ -39,7 +40,8 @@ export interface Task {
 
 export interface AgentState {
   agent_id: string;
-  tasks: Task[];
+  pending_task_count: number;
+  current_task?: { id: string; from: string; content: string; reward: number };
 }
 
 // --- Events ---
@@ -68,6 +70,7 @@ export interface ToolRegistry {
 export interface IncomingMessage {
   from: string;
   content: string;
+  reward?: number;
   reply_url?: string;
 }
 

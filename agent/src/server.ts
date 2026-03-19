@@ -23,7 +23,8 @@ export function createServer(agent: Agent): Hono {
       return c.json({ error: "'content' must be a non-empty string" }, 400);
     }
 
-    const task = agent.enqueue(body.from, body.content, body.reply_url);
+    const reward = typeof body.reward === "number" ? body.reward : 0;
+    const task = agent.enqueue(body.from, body.content, reward, body.reply_url);
     return c.json({ task_id: task.id }, 202);
   });
 
@@ -33,6 +34,10 @@ export function createServer(agent: Agent): Hono {
       return c.json({ error: "Task not found" }, 404);
     }
     return c.json(task);
+  });
+
+  app.get("/tasks", (c) => {
+    return c.json(agent.listPending());
   });
 
   app.get("/health", (c) => {
