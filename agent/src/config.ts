@@ -21,6 +21,9 @@ export function loadConfig(): AgentConfig {
   if (typeof config.port !== "number") {
     throw new Error("config.port must be a number");
   }
+  if (typeof config.url !== "string" || !config.url) {
+    throw new Error("config.url is required");
+  }
   if (typeof config.model !== "string" || !config.model) {
     throw new Error("config.model is required");
   }
