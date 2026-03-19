@@ -17,6 +17,9 @@ export interface AgentConfig {
   system_prompt: string;
   peers: PeerConfig[];
   event_server_url?: string;
+  wallet_address: string;
+  wallet_private_key: string;
+  price?: string;
 }
 
 // --- Tasks ---
@@ -56,7 +59,7 @@ export interface Event {
 
 // --- Tool System ---
 
-export type ToolDefinition = Anthropic.Tool;
+export type ToolDefinition = Anthropic.Messages.ToolUnion;
 
 export type ToolResult = string;
 

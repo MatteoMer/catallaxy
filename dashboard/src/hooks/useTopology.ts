@@ -47,6 +47,7 @@ export function useTopology() {
               port: a.port,
               tools: a.tools,
               color: getRoleColor(a.role),
+              walletAddress: a.wallet_address,
             },
           };
         });

@@ -3,6 +3,8 @@
  * Run: npx tsx generate-compose.ts > docker-compose.yml
  */
 
+import { generatePrivateKey, privateKeyToAccount } from "viem/accounts";
+
 interface AgentDef {
   id: string;
   port: number;
@@ -13,18 +15,18 @@ interface AgentDef {
 }
 
 const agents: AgentDef[] = [
-  // Research
-  { id: "alpha",   port: 4201, model: "claude-opus-4-6",             tools: ["web_search"],      role: "research", system_prompt: "You are a research specialist. You find information, synthesize sources, and deliver concise answers. You can delegate tasks to peers." },
-  { id: "beta",    port: 4202, model: "claude-sonnet-4-6",           tools: ["web_search"],      role: "research", system_prompt: "You are a research specialist. You find information, synthesize sources, and deliver concise answers. You can delegate tasks to peers." },
-  { id: "gamma",   port: 4203, model: "claude-haiku-4-5-20251001",   tools: ["web_search"],      role: "research", system_prompt: "You are a research specialist. You find information, synthesize sources, and deliver concise answers. You can delegate tasks to peers." },
-  // Coders
-  { id: "delta",   port: 4301, model: "claude-sonnet-4-6",           tools: ["code_exec"],       role: "coding", system_prompt: "You are a coding specialist. You write, debug, and review code. You can delegate tasks to peers." },
-  { id: "epsilon", port: 4302, model: "claude-opus-4-6",             tools: ["code_exec"],       role: "coding", system_prompt: "You are a coding specialist. You write, debug, and review code. You can delegate tasks to peers." },
-  { id: "zeta",    port: 4303, model: "claude-haiku-4-5-20251001",   tools: ["code_exec"],       role: "coding", system_prompt: "You are a coding specialist. You write, debug, and review code. You can delegate tasks to peers." },
-  // Writers
-  { id: "eta",     port: 4401, model: "claude-opus-4-6",             tools: ["write_document"],  role: "writing", system_prompt: "You are a writing specialist. You draft documents, reports, and prose. You can delegate tasks to peers." },
-  { id: "theta",   port: 4402, model: "claude-sonnet-4-6",           tools: ["write_document"],  role: "writing", system_prompt: "You are a writing specialist. You draft documents, reports, and prose. You can delegate tasks to peers." },
-  { id: "iota",    port: 4403, model: "claude-haiku-4-5-20251001",   tools: ["write_document"],  role: "writing", system_prompt: "You are a writing specialist. You draft documents, reports, and prose. You can delegate tasks to peers." },
+  // Research — can search the web but can't execute code
+  { id: "alpha",   port: 4201, model: "claude-opus-4-6",             tools: ["web_search"],        role: "research", system_prompt: "You are a research specialist. You find information, synthesize sources, and deliver concise answers. You can delegate tasks to peers." },
+  { id: "beta",    port: 4202, model: "claude-sonnet-4-6",           tools: ["web_search"],        role: "research", system_prompt: "You are a research specialist. You find information, synthesize sources, and deliver concise answers. You can delegate tasks to peers." },
+  { id: "gamma",   port: 4203, model: "claude-haiku-4-5-20251001",   tools: ["web_search"],        role: "research", system_prompt: "You are a research specialist. You find information, synthesize sources, and deliver concise answers. You can delegate tasks to peers." },
+  // Coders — can execute code but can't search the web
+  { id: "delta",   port: 4301, model: "claude-sonnet-4-6",           tools: ["code_execution"],    role: "coding", system_prompt: "You are a coding specialist. You write, debug, and review code. You can delegate tasks to peers." },
+  { id: "epsilon", port: 4302, model: "claude-opus-4-6",             tools: ["code_execution"],    role: "coding", system_prompt: "You are a coding specialist. You write, debug, and review code. You can delegate tasks to peers." },
+  { id: "zeta",    port: 4303, model: "claude-haiku-4-5-20251001",   tools: ["code_execution"],    role: "coding", system_prompt: "You are a coding specialist. You write, debug, and review code. You can delegate tasks to peers." },
+  // Writers — no server tools, specialization is in the prompt. Can delegate to peers.
+  { id: "eta",     port: 4401, model: "claude-opus-4-6",             tools: [],                    role: "writing", system_prompt: "You are a writing specialist. You draft documents, reports, and prose. You can delegate tasks to peers." },
+  { id: "theta",   port: 4402, model: "claude-sonnet-4-6",           tools: [],                    role: "writing", system_prompt: "You are a writing specialist. You draft documents, reports, and prose. You can delegate tasks to peers." },
+  { id: "iota",    port: 4403, model: "claude-haiku-4-5-20251001",   tools: [],                    role: "writing", system_prompt: "You are a writing specialist. You draft documents, reports, and prose. You can delegate tasks to peers." },
 ];
 
 const PEERS_PER_AGENT = 2;
@@ -90,11 +92,26 @@ function buildNetwork(n: number, peersPerAgent: number): Map<number, Set<number>
   return adj;
 }
 
+// --- Operator wallet ---
+
+const operatorPrivateKey = generatePrivateKey();
+const operatorAccount = privateKeyToAccount(operatorPrivateKey);
+
 // --- Generate YAML ---
 
 const network = buildNetwork(agents.length, PEERS_PER_AGENT);
 
-// Build topology JSON for the dashboard
+// Pre-generate wallets for all agents + control
+const agentWallets = agents.map(() => {
+  const pk = generatePrivateKey();
+  return { privateKey: pk, address: privateKeyToAccount(pk).address };
+});
+const controlWallet = (() => {
+  const pk = generatePrivateKey();
+  return { privateKey: pk, address: privateKeyToAccount(pk).address };
+})();
+
+// Build topology JSON for the dashboard (includes wallet addresses)
 const allAgentsDefs = [
   ...agents.map((a, i) => ({
     id: a.id,
@@ -102,13 +119,15 @@ const allAgentsDefs = [
     role: a.role,
     tools: a.tools,
     peers: Array.from(network.get(i)!).map(j => agents[j].id),
+    wallet_address: agentWallets[i].address,
   })),
   {
     id: "control",
     port: 4500,
     role: "control",
-    tools: ["web_search", "code_exec", "write_document"],
+    tools: ["web_search", "code_execution"],
     peers: [] as string[],
+    wallet_address: controlWallet.address,
   },
 ];
 
@@ -122,6 +141,8 @@ x-agent: &agent-base
   depends_on:
     event-server:
       condition: service_healthy
+    operator:
+      condition: service_completed_successfully
 
 services:
   event-server:
@@ -150,6 +171,8 @@ for (let i = 0; i < agents.length; i++) {
     description: "An agent",
   }));
 
+  const wallet = agentWallets[i];
+
   const config = {
     id: agent.id,
     port: agent.port,
@@ -159,6 +182,8 @@ for (let i = 0; i < agents.length; i++) {
     system_prompt: agent.system_prompt,
     peers,
     event_server_url: "http://event-server:4100",
+    wallet_address: wallet.address,
+    wallet_private_key: wallet.privateKey,
   };
 
   yaml += `
@@ -181,10 +206,12 @@ const controlConfig = {
   port: 4500,
   url: "http://control:4500",
   model: "claude-sonnet-4-6",
-  tools: ["web_search", "code_exec", "write_document"],
+  tools: ["web_search", "code_execution"],
   system_prompt: "You are a generalist assistant. You can research, code, and write. Complete tasks independently.",
   peers: [],
   event_server_url: "http://event-server:4100",
+  wallet_address: controlWallet.address,
+  wallet_private_key: controlWallet.privateKey,
 };
 
 yaml += `
@@ -198,6 +225,15 @@ yaml += `
     environment:
       AGENT_CONFIG: >
         ${JSON.stringify(controlConfig)}
+
+  operator:
+    build: ./operator
+    depends_on:
+      event-server:
+        condition: service_healthy
+    environment:
+      OPERATOR_PRIVATE_KEY: "${operatorPrivateKey}"
+      AGENT_ADDRESSES: "${[...agentWallets.map(w => w.address), controlWallet.address].join(",")}"
 
   dashboard:
     build: ./dashboard

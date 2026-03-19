@@ -36,6 +36,13 @@ export function loadConfig(): AgentConfig {
   if (!Array.isArray(config.peers)) {
     throw new Error("config.peers must be an array");
   }
+  if (typeof config.wallet_address !== "string" || !config.wallet_address.startsWith("0x")) {
+    throw new Error("config.wallet_address must be a hex string starting with 0x");
+  }
+  if (typeof config.wallet_private_key !== "string" || !config.wallet_private_key.startsWith("0x")) {
+    throw new Error("config.wallet_private_key must be a hex string starting with 0x");
+  }
+
   for (const [i, peer] of (config.peers as unknown[]).entries()) {
     const p = peer as Record<string, unknown>;
     if (typeof p?.id !== "string" || !p.id) {

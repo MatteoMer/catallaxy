@@ -1,5 +1,6 @@
 import { memo, useState, useEffect, useCallback } from "react";
 import { Handle, Position, type NodeProps } from "@xyflow/react";
+import { fetchBalance } from "../lib/balance";
 
 interface AgentNodeData {
   label: string;
@@ -7,24 +8,41 @@ interface AgentNodeData {
   port: number;
   tools: string[];
   color: string;
+  walletAddress: string;
   [key: string]: unknown;
 }
 
 function AgentNodeInner({ data }: NodeProps) {
-  const { label, role, port, color } = data as unknown as AgentNodeData;
+  const { label, role, port, color, walletAddress } =
+    data as unknown as AgentNodeData;
   const [healthy, setHealthy] = useState<boolean | null>(null);
+  const [balance, setBalance] = useState<string | null>(null);
 
   const checkHealth = useCallback(() => {
-    fetch(`http://localhost:${port}/health`, { signal: AbortSignal.timeout(3000) })
+    fetch(`http://localhost:${port}/health`, {
+      signal: AbortSignal.timeout(3000),
+    })
       .then((r) => setHealthy(r.ok))
       .catch(() => setHealthy(false));
   }, [port]);
 
+  const refreshBalance = useCallback(() => {
+    if (!walletAddress) return;
+    fetchBalance(walletAddress)
+      .then(setBalance)
+      .catch(() => setBalance("—"));
+  }, [walletAddress]);
+
   useEffect(() => {
     checkHealth();
-    const interval = setInterval(checkHealth, 10000);
-    return () => clearInterval(interval);
-  }, [checkHealth]);
+    refreshBalance();
+    const healthInterval = setInterval(checkHealth, 10000);
+    const balanceInterval = setInterval(refreshBalance, 15000);
+    return () => {
+      clearInterval(healthInterval);
+      clearInterval(balanceInterval);
+    };
+  }, [checkHealth, refreshBalance]);
 
   return (
     <div
@@ -35,8 +53,16 @@ function AgentNodeInner({ data }: NodeProps) {
         boxShadow: `0 0 20px ${color}22`,
       }}
     >
-      <Handle type="target" position={Position.Left} className="!bg-[var(--border-subtle)] !w-2 !h-2" />
-      <Handle type="source" position={Position.Right} className="!bg-[var(--border-subtle)] !w-2 !h-2" />
+      <Handle
+        type="target"
+        position={Position.Left}
+        className="!bg-[var(--border-subtle)] !w-2 !h-2"
+      />
+      <Handle
+        type="source"
+        position={Position.Right}
+        className="!bg-[var(--border-subtle)] !w-2 !h-2"
+      />
 
       <div className="flex items-center gap-2 mb-1">
         <div className="relative">
@@ -45,8 +71,8 @@ function AgentNodeInner({ data }: NodeProps) {
               healthy === null
                 ? "bg-gray-500"
                 : healthy
-                ? "bg-emerald-400"
-                : "bg-red-400"
+                  ? "bg-emerald-400"
+                  : "bg-red-400"
             }`}
           />
           {healthy && (
@@ -56,12 +82,19 @@ function AgentNodeInner({ data }: NodeProps) {
         <span className="font-semibold text-sm capitalize">{label}</span>
       </div>
 
-      <span
-        className="text-[10px] font-medium px-1.5 py-0.5 rounded-full"
-        style={{ background: `${color}22`, color }}
-      >
-        {role}
-      </span>
+      <div className="flex items-center gap-2">
+        <span
+          className="text-[10px] font-medium px-1.5 py-0.5 rounded-full"
+          style={{ background: `${color}22`, color }}
+        >
+          {role}
+        </span>
+        {balance !== null && (
+          <span className="text-[10px] font-mono text-[var(--text-secondary)]">
+            ${balance}
+          </span>
+        )}
+      </div>
     </div>
   );
 }

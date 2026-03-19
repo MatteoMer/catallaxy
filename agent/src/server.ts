@@ -1,14 +1,22 @@
 import { Hono } from "hono";
 import { cors } from "hono/cors";
+import { Mppx, tempo } from "mppx/hono";
 import type { Agent } from "./agent.js";
-import type { IncomingMessage } from "./types.js";
+import type { AgentConfig, IncomingMessage } from "./types.js";
 
-export function createServer(agent: Agent): Hono {
+const TEMPO_TESTNET_PATHUSD = "0x20c0000000000000000000000000000000000000";
+
+export function createServer(agent: Agent, config: AgentConfig): Hono {
   const app = new Hono();
 
   app.use(cors());
 
-  app.post("/message", async (c) => {
+  const mppx = Mppx.create({
+    methods: [tempo.charge({ currency: TEMPO_TESTNET_PATHUSD, recipient: config.wallet_address as `0x${string}`, testnet: true })],
+    secretKey: config.wallet_private_key,
+  });
+
+  app.post("/message", mppx.charge({ amount: config.price ?? "0.05" }), async (c) => {
     let body: IncomingMessage;
     try {
       body = await c.req.json<IncomingMessage>();

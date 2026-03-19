@@ -5,7 +5,7 @@ import { getPeerTools } from "./peers.js";
 
 export function createToolRegistry(config: AgentConfig, logger: Logger): ToolRegistry {
   const builtins = getBuiltinTools(config.tools);
-  const peers = getPeerTools(config.peers, config.id, config.url, logger);
+  const peers = getPeerTools(config.peers, config.id, config.url, logger, config.wallet_private_key as `0x${string}`);
 
   const builtinNames = new Set(builtins.definitions.map((d) => d.name));
   const peerNames = new Set(peers.definitions.map((d) => d.name));
