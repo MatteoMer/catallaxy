@@ -36,12 +36,18 @@ export function getPeerTools(
 
     logger.log("peer_request", { peer_id: peer.id, message: input.message });
 
-    // POST message to peer
-    const postRes = await fetch(`${peer.url}/message`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ from: agentId, content: input.message }),
-    });
+    let postRes: Response;
+    try {
+      postRes = await fetch(`${peer.url}/message`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ from: agentId, content: input.message }),
+      });
+    } catch (err) {
+      const msg = `Cannot reach peer ${peer.id} at ${peer.url}: ${err instanceof Error ? err.message : String(err)}`;
+      logger.log("peer_error", { peer_id: peer.id, error: msg });
+      return msg;
+    }
 
     if (!postRes.ok) {
       const errorText = await postRes.text();
@@ -55,7 +61,12 @@ export function getPeerTools(
     while (Date.now() < deadline) {
       await new Promise((resolve) => setTimeout(resolve, POLL_INTERVAL_MS));
 
-      const pollRes = await fetch(`${peer.url}/tasks/${task_id}`);
+      let pollRes: Response;
+      try {
+        pollRes = await fetch(`${peer.url}/tasks/${task_id}`);
+      } catch {
+        continue;
+      }
       if (!pollRes.ok) continue;
 
       const task = (await pollRes.json()) as Task;

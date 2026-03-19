@@ -71,10 +71,11 @@ export function getBuiltinTools(names: string[]): {
     .map((n) => allBuiltins[n])
     .filter((t): t is BuiltinTool => t !== undefined);
 
+  const selectedMap = new Map(selected.map((t) => [t.definition.name, t]));
   const definitions = selected.map((t) => t.definition);
 
   const dispatch = async (name: string, input: Record<string, unknown>): Promise<ToolResult> => {
-    const tool = allBuiltins[name];
+    const tool = selectedMap.get(name);
     if (!tool) throw new Error(`Unknown builtin tool: ${name}`);
     return tool.execute(input);
   };

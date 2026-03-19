@@ -33,6 +33,18 @@ export function loadConfig(): AgentConfig {
   if (!Array.isArray(config.peers)) {
     throw new Error("config.peers must be an array");
   }
+  for (const [i, peer] of (config.peers as unknown[]).entries()) {
+    const p = peer as Record<string, unknown>;
+    if (typeof p?.id !== "string" || !p.id) {
+      throw new Error(`config.peers[${i}].id is required`);
+    }
+    if (typeof p.url !== "string" || !p.url) {
+      throw new Error(`config.peers[${i}].url is required`);
+    }
+    if (typeof p.description !== "string") {
+      throw new Error(`config.peers[${i}].description is required`);
+    }
+  }
 
   return parsed as AgentConfig;
 }

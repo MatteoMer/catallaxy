@@ -6,7 +6,12 @@ export function createServer(agent: Agent): Hono {
   const app = new Hono();
 
   app.post("/message", async (c) => {
-    const body = await c.req.json<IncomingMessage>();
+    let body: IncomingMessage;
+    try {
+      body = await c.req.json<IncomingMessage>();
+    } catch {
+      return c.json({ error: "Invalid JSON body" }, 400);
+    }
 
     if (!body.from || !body.content) {
       return c.json({ error: "Missing 'from' or 'content'" }, 400);

@@ -40,8 +40,9 @@ export function createAgent(agentId: string, llm: LLMClient, logger: Logger): Ag
     } finally {
       next.updated_at = new Date().toISOString();
       processing = false;
-      // Process next queued task
-      processNext();
+      processNext().catch((err) => {
+        logger.log("worker_error", { error: String(err) });
+      });
     }
   }
 
