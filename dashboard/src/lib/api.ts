@@ -24,7 +24,7 @@ export async function sendMission(
   agentPort: number,
   content: string
 ): Promise<{ task_id: string }> {
-  const res = await fetch(`http://localhost:${agentPort}/message`, {
+  const res = await fetch(`http://localhost:${agentPort}/mission`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ from: "operator", content }),

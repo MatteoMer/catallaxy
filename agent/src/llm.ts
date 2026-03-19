@@ -26,8 +26,6 @@ export function createLLMClient(
   logger: Logger,
   tokenStore?: TokenStore,
 ): LLMClient {
-  // When using OAuth (Claude Max), we create a new client per call with a fresh token.
-  // When using API key, we reuse a single client.
   const staticClient = tokenStore ? null : new Anthropic();
 
   async function getClient(): Promise<Anthropic> {
@@ -59,7 +57,10 @@ export function createLLMClient(
     maxTokens: number,
   ): Promise<string> {
     for (let i = 0; i < maxIterations; i++) {
-      logger.log("llm_call", { iteration: i, message_count: messages.length });
+      logger.log("llm_call", {
+        iteration: i,
+        message_count: messages.length,
+      });
 
       const response = await client.messages.create({
         model,
@@ -72,6 +73,11 @@ export function createLLMClient(
       logger.log("llm_response", {
         stop_reason: response.stop_reason,
         content_blocks: response.content.length,
+        usage: response.usage,
+        text: response.content
+          .filter((b): b is Anthropic.TextBlock => b.type === "text")
+          .map((b) => b.text.slice(0, 300))
+          .join("\n") || undefined,
       });
 
       if (response.stop_reason === "end_turn") {
@@ -90,14 +96,23 @@ export function createLLMClient(
 
         const toolResults: Anthropic.ToolResultBlockParam[] = [];
         for (const toolUse of toolUseBlocks) {
+          logger.log("tool_call", {
+            tool: toolUse.name,
+            input: JSON.stringify(toolUse.input).slice(0, 500),
+          });
           try {
             const result = await dispatch(
               toolUse.name,
               toolUse.input as Record<string, unknown>,
             );
+            logger.log("tool_result", {
+              tool: toolUse.name,
+              result: typeof result === "string" ? result.slice(0, 500) : "(non-string)",
+            });
             toolResults.push({ type: "tool_result", tool_use_id: toolUse.id, content: result });
           } catch (err) {
             const errorMsg = err instanceof Error ? err.message : String(err);
+            logger.log("tool_error", { tool: toolUse.name, error: errorMsg });
             toolResults.push({
               type: "tool_result",
               tool_use_id: toolUse.id,

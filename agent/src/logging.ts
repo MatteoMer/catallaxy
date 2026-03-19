@@ -6,8 +6,13 @@ export interface Logger {
 }
 
 export function createLogger(agentId: string, eventServerUrl?: string): Logger {
+  const tag = `[${agentId}]`;
+
   return {
     log(eventType: string, data: Record<string, unknown>): void {
+      // Always log to stdout for docker compose logs
+      console.log(`${tag} ${eventType}`, JSON.stringify(data, null, 2));
+
       const event: Event = {
         agent_id: agentId,
         event_type: eventType,

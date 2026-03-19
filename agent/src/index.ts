@@ -17,7 +17,7 @@ const tokenStore = process.env.ANTHROPIC_API_KEY ? undefined : createTokenStore(
 const llm = createLLMClient(config.model, config.system_prompt, toolRegistry, logger, tokenStore);
 const db = openTaskDb(config.id);
 const agent = createAgent(config.id, db, llm, logger);
-const app = createServer(agent);
+const app = createServer(agent, config);
 
 serve({ fetch: app.fetch, port: config.port }, (info) => {
   const authMode = tokenStore ? "OAuth (Claude Max)" : "API key";

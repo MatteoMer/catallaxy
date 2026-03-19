@@ -1,0 +1,16 @@
+{
+  "name": "catallaxy-operator",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "tsx fund-agents.ts"
+  },
+  "dependencies": {
+    "viem": "^2.47.5"
+  },
+  "devDependencies": {
+    "tsx": "^4.19.3",
+    "typescript": "^5.8.2"
+  }
+}

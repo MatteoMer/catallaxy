@@ -4,6 +4,7 @@ export interface TopologyAgent {
   role: string;
   tools: string[];
   peers: string[];
+  wallet_address: string;
 }
 
 export interface EventRow {

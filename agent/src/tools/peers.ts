@@ -1,3 +1,5 @@
+import { Mppx, tempo } from "mppx/client";
+import { privateKeyToAccount } from "viem/accounts";
 import type { PeerConfig, ToolDefinition, ToolResult, TaskResponse } from "../types.js";
 import type { Logger } from "../logging.js";
 
@@ -6,10 +8,16 @@ export function getPeerTools(
   agentId: string,
   selfUrl: string,
   logger: Logger,
+  walletPrivateKey: `0x${string}`,
 ): {
   definitions: ToolDefinition[];
   dispatch: (name: string, input: Record<string, unknown>) => Promise<ToolResult>;
 } {
+  const mppxClient = Mppx.create({
+    methods: [tempo.charge({ account: privateKeyToAccount(walletPrivateKey) })],
+    polyfill: false,
+  });
+
   const peerMap = new Map<string, PeerConfig>();
 
   const definitions: ToolDefinition[] = peers.map((peer) => {
@@ -37,7 +45,7 @@ export function getPeerTools(
 
     let postRes: Response;
     try {
-      postRes = await fetch(`${peer.url}/message`, {
+      postRes = await mppxClient.fetch(`${peer.url}/message`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ from: agentId, content: input.message, reward: input.reward ?? 0, reply_url: selfUrl }),
