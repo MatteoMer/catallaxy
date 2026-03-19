@@ -1,9 +1,12 @@
 import { Hono } from "hono";
+import { cors } from "hono/cors";
 import type { Agent } from "./agent.js";
 import type { IncomingMessage } from "./types.js";
 
 export function createServer(agent: Agent): Hono {
   const app = new Hono();
+
+  app.use(cors());
 
   app.post("/message", async (c) => {
     let body: IncomingMessage;

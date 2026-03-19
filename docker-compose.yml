@@ -16,6 +16,8 @@ services:
       - "4100:4100"
     environment:
       PORT: "4100"
+      NETWORK_TOPOLOGY: >
+        [{"id":"alpha","port":4201,"role":"research","tools":["web_search"],"peers":["eta","zeta"]},{"id":"beta","port":4202,"role":"research","tools":["web_search"],"peers":["eta","gamma","theta"]},{"id":"gamma","port":4203,"role":"research","tools":["web_search"],"peers":["delta","beta","zeta"]},{"id":"delta","port":4301,"role":"coding","tools":["code_exec"],"peers":["iota","gamma"]},{"id":"epsilon","port":4302,"role":"coding","tools":["code_exec"],"peers":["eta","iota"]},{"id":"zeta","port":4303,"role":"coding","tools":["code_exec"],"peers":["alpha","gamma"]},{"id":"eta","port":4401,"role":"writing","tools":["write_document"],"peers":["alpha","epsilon","beta"]},{"id":"theta","port":4402,"role":"writing","tools":["write_document"],"peers":["iota","beta"]},{"id":"iota","port":4403,"role":"writing","tools":["write_document"],"peers":["epsilon","delta","theta"]},{"id":"control","port":4500,"role":"control","tools":["web_search","code_exec","write_document"],"peers":[]}]
     volumes:
       - event-data:/app/data
     healthcheck:
@@ -30,7 +32,7 @@ services:
       - "4201:4201"
     environment:
       AGENT_CONFIG: >
-        {"id":"alpha","port":4201,"model":"claude-opus-4-6","tools":["web_search"],"system_prompt":"You are a research specialist. You find information, synthesize sources, and deliver concise answers. You can delegate tasks to peers.","peers":[{"id":"theta","url":"http://theta:4402","description":"An agent"},{"id":"zeta","url":"http://zeta:4303","description":"An agent"}],"event_server_url":"http://event-server:4100"}
+        {"id":"alpha","port":4201,"model":"claude-opus-4-6","tools":["web_search"],"system_prompt":"You are a research specialist. You find information, synthesize sources, and deliver concise answers. You can delegate tasks to peers.","peers":[{"id":"eta","url":"http://eta:4401","description":"An agent"},{"id":"zeta","url":"http://zeta:4303","description":"An agent"}],"event_server_url":"http://event-server:4100"}
 
   beta:
     <<: *agent-base
@@ -38,7 +40,7 @@ services:
       - "4202:4202"
     environment:
       AGENT_CONFIG: >
-        {"id":"beta","port":4202,"model":"claude-sonnet-4-6","tools":["web_search"],"system_prompt":"You are a research specialist. You find information, synthesize sources, and deliver concise answers. You can delegate tasks to peers.","peers":[{"id":"iota","url":"http://iota:4403","description":"An agent"},{"id":"delta","url":"http://delta:4301","description":"An agent"}],"event_server_url":"http://event-server:4100"}
+        {"id":"beta","port":4202,"model":"claude-sonnet-4-6","tools":["web_search"],"system_prompt":"You are a research specialist. You find information, synthesize sources, and deliver concise answers. You can delegate tasks to peers.","peers":[{"id":"eta","url":"http://eta:4401","description":"An agent"},{"id":"gamma","url":"http://gamma:4203","description":"An agent"},{"id":"theta","url":"http://theta:4402","description":"An agent"}],"event_server_url":"http://event-server:4100"}
 
   gamma:
     <<: *agent-base
@@ -46,7 +48,7 @@ services:
       - "4203:4203"
     environment:
       AGENT_CONFIG: >
-        {"id":"gamma","port":4203,"model":"claude-haiku-4-5-20251001","tools":["web_search"],"system_prompt":"You are a research specialist. You find information, synthesize sources, and deliver concise answers. You can delegate tasks to peers.","peers":[{"id":"eta","url":"http://eta:4401","description":"An agent"},{"id":"iota","url":"http://iota:4403","description":"An agent"}],"event_server_url":"http://event-server:4100"}
+        {"id":"gamma","port":4203,"model":"claude-haiku-4-5-20251001","tools":["web_search"],"system_prompt":"You are a research specialist. You find information, synthesize sources, and deliver concise answers. You can delegate tasks to peers.","peers":[{"id":"delta","url":"http://delta:4301","description":"An agent"},{"id":"beta","url":"http://beta:4202","description":"An agent"},{"id":"zeta","url":"http://zeta:4303","description":"An agent"}],"event_server_url":"http://event-server:4100"}
 
   delta:
     <<: *agent-base
@@ -54,7 +56,7 @@ services:
       - "4301:4301"
     environment:
       AGENT_CONFIG: >
-        {"id":"delta","port":4301,"model":"claude-sonnet-4-6","tools":["code_exec"],"system_prompt":"You are a coding specialist. You write, debug, and review code. You can delegate tasks to peers.","peers":[{"id":"theta","url":"http://theta:4402","description":"An agent"},{"id":"epsilon","url":"http://epsilon:4302","description":"An agent"},{"id":"beta","url":"http://beta:4202","description":"An agent"}],"event_server_url":"http://event-server:4100"}
+        {"id":"delta","port":4301,"model":"claude-sonnet-4-6","tools":["code_exec"],"system_prompt":"You are a coding specialist. You write, debug, and review code. You can delegate tasks to peers.","peers":[{"id":"iota","url":"http://iota:4403","description":"An agent"},{"id":"gamma","url":"http://gamma:4203","description":"An agent"}],"event_server_url":"http://event-server:4100"}
 
   epsilon:
     <<: *agent-base
@@ -62,7 +64,7 @@ services:
       - "4302:4302"
     environment:
       AGENT_CONFIG: >
-        {"id":"epsilon","port":4302,"model":"claude-opus-4-6","tools":["code_exec"],"system_prompt":"You are a coding specialist. You write, debug, and review code. You can delegate tasks to peers.","peers":[{"id":"delta","url":"http://delta:4301","description":"An agent"},{"id":"zeta","url":"http://zeta:4303","description":"An agent"}],"event_server_url":"http://event-server:4100"}
+        {"id":"epsilon","port":4302,"model":"claude-opus-4-6","tools":["code_exec"],"system_prompt":"You are a coding specialist. You write, debug, and review code. You can delegate tasks to peers.","peers":[{"id":"eta","url":"http://eta:4401","description":"An agent"},{"id":"iota","url":"http://iota:4403","description":"An agent"}],"event_server_url":"http://event-server:4100"}
 
   zeta:
     <<: *agent-base
@@ -70,7 +72,7 @@ services:
       - "4303:4303"
     environment:
       AGENT_CONFIG: >
-        {"id":"zeta","port":4303,"model":"claude-haiku-4-5-20251001","tools":["code_exec"],"system_prompt":"You are a coding specialist. You write, debug, and review code. You can delegate tasks to peers.","peers":[{"id":"alpha","url":"http://alpha:4201","description":"An agent"},{"id":"epsilon","url":"http://epsilon:4302","description":"An agent"}],"event_server_url":"http://event-server:4100"}
+        {"id":"zeta","port":4303,"model":"claude-haiku-4-5-20251001","tools":["code_exec"],"system_prompt":"You are a coding specialist. You write, debug, and review code. You can delegate tasks to peers.","peers":[{"id":"alpha","url":"http://alpha:4201","description":"An agent"},{"id":"gamma","url":"http://gamma:4203","description":"An agent"}],"event_server_url":"http://event-server:4100"}
 
   eta:
     <<: *agent-base
@@ -78,7 +80,7 @@ services:
       - "4401:4401"
     environment:
       AGENT_CONFIG: >
-        {"id":"eta","port":4401,"model":"claude-opus-4-6","tools":["write_document"],"system_prompt":"You are a writing specialist. You draft documents, reports, and prose. You can delegate tasks to peers.","peers":[{"id":"theta","url":"http://theta:4402","description":"An agent"},{"id":"gamma","url":"http://gamma:4203","description":"An agent"}],"event_server_url":"http://event-server:4100"}
+        {"id":"eta","port":4401,"model":"claude-opus-4-6","tools":["write_document"],"system_prompt":"You are a writing specialist. You draft documents, reports, and prose. You can delegate tasks to peers.","peers":[{"id":"alpha","url":"http://alpha:4201","description":"An agent"},{"id":"epsilon","url":"http://epsilon:4302","description":"An agent"},{"id":"beta","url":"http://beta:4202","description":"An agent"}],"event_server_url":"http://event-server:4100"}
 
   theta:
     <<: *agent-base
@@ -86,7 +88,7 @@ services:
       - "4402:4402"
     environment:
       AGENT_CONFIG: >
-        {"id":"theta","port":4402,"model":"claude-sonnet-4-6","tools":["write_document"],"system_prompt":"You are a writing specialist. You draft documents, reports, and prose. You can delegate tasks to peers.","peers":[{"id":"iota","url":"http://iota:4403","description":"An agent"},{"id":"eta","url":"http://eta:4401","description":"An agent"},{"id":"delta","url":"http://delta:4301","description":"An agent"},{"id":"alpha","url":"http://alpha:4201","description":"An agent"}],"event_server_url":"http://event-server:4100"}
+        {"id":"theta","port":4402,"model":"claude-sonnet-4-6","tools":["write_document"],"system_prompt":"You are a writing specialist. You draft documents, reports, and prose. You can delegate tasks to peers.","peers":[{"id":"iota","url":"http://iota:4403","description":"An agent"},{"id":"beta","url":"http://beta:4202","description":"An agent"}],"event_server_url":"http://event-server:4100"}
 
   iota:
     <<: *agent-base
@@ -94,7 +96,7 @@ services:
       - "4403:4403"
     environment:
       AGENT_CONFIG: >
-        {"id":"iota","port":4403,"model":"claude-haiku-4-5-20251001","tools":["write_document"],"system_prompt":"You are a writing specialist. You draft documents, reports, and prose. You can delegate tasks to peers.","peers":[{"id":"theta","url":"http://theta:4402","description":"An agent"},{"id":"beta","url":"http://beta:4202","description":"An agent"},{"id":"gamma","url":"http://gamma:4203","description":"An agent"}],"event_server_url":"http://event-server:4100"}
+        {"id":"iota","port":4403,"model":"claude-haiku-4-5-20251001","tools":["write_document"],"system_prompt":"You are a writing specialist. You draft documents, reports, and prose. You can delegate tasks to peers.","peers":[{"id":"epsilon","url":"http://epsilon:4302","description":"An agent"},{"id":"delta","url":"http://delta:4301","description":"An agent"},{"id":"theta","url":"http://theta:4402","description":"An agent"}],"event_server_url":"http://event-server:4100"}
 
   control:
     <<: *agent-base
@@ -103,6 +105,14 @@ services:
     environment:
       AGENT_CONFIG: >
         {"id":"control","port":4500,"model":"claude-sonnet-4-6","tools":["web_search","code_exec","write_document"],"system_prompt":"You are a generalist assistant. You can research, code, and write. Complete tasks independently.","peers":[],"event_server_url":"http://event-server:4100"}
+
+  dashboard:
+    build: ./dashboard
+    ports:
+      - "4000:4000"
+    depends_on:
+      event-server:
+        condition: service_healthy
 
 volumes:
   event-data:

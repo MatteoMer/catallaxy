@@ -46,9 +46,10 @@ export interface AgentState {
 
 export interface Event {
   agent_id: string;
-  type: string;
+  event_type: string;
   data: Record<string, unknown>;
   timestamp: string;
+  correlation_id: string;
 }
 
 // --- Tool System ---
