@@ -1,0 +1,9 @@
+{
+  "name": "catallaxy",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "generate": "npx tsx generate-compose.ts > docker-compose.yml",
+    "start": "npx tsx generate-compose.ts > docker-compose.yml && docker compose up --build"
+  }
+}
