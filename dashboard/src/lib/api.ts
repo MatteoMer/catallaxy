@@ -20,16 +20,17 @@ export async function fetchEvents(params?: {
   return res.json();
 }
 
-export async function sendMission(
+export async function sendMessage(
   agentPort: number,
-  content: string
+  content: string,
+  reward?: number
 ): Promise<{ task_id: string }> {
-  const res = await fetch(`http://localhost:${agentPort}/mission`, {
+  const res = await fetch(`http://localhost:${agentPort}/message`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ from: "operator", content }),
+    body: JSON.stringify({ from: "operator", content, reward }),
   });
-  if (!res.ok) throw new Error("Failed to send mission");
+  if (!res.ok) throw new Error("Failed to send message");
   return res.json();
 }
 

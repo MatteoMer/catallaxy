@@ -24,7 +24,7 @@ export interface AgentConfig {
 
 // --- Tasks ---
 
-export type TaskStatus = "queued" | "running" | "completed" | "failed";
+export type TaskStatus = "queued" | "running" | "completed" | "failed" | "rejected";
 
 export interface Task {
   id: string;
@@ -79,4 +79,15 @@ export interface IncomingMessage {
 
 export interface TaskResponse {
   task_id: string;
+}
+
+// --- Channels ---
+
+export interface ChannelMessage {
+  id: number;
+  channel_id: string;
+  from: string;
+  type: "completed" | "failed" | "rejected" | "info";
+  content: string;
+  created_at: string;
 }

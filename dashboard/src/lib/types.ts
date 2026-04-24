@@ -20,8 +20,10 @@ export interface EventRow {
 export interface Mission {
   agentId: string;
   content: string;
+  reward?: number;
   taskId?: string;
   status?: string;
+  result?: string;
   sentAt: string;
 }
 

@@ -6,7 +6,7 @@
     "generate": "npx tsx generate-compose.ts > docker-compose.yml",
     "start": "npx tsx generate-compose.ts > docker-compose.yml && docker compose build && docker compose up"
   },
-  "dependencies": {
+  "devDependencies": {
     "viem": "^2.47.5"
   }
 }

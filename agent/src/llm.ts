@@ -5,6 +5,7 @@ import type { TokenStore } from "./auth/token-store.js";
 
 const MAX_ITERATIONS = 20;
 const SELECTION_MAX_ITERATIONS = 3;
+const EVALUATION_MAX_ITERATIONS = 3;
 const OAUTH_BETAS = "oauth-2025-04-20,claude-code-20250219,interleaved-thinking-2025-05-14,fine-grained-tool-streaming-2025-05-14";
 const OAUTH_SYSTEM_PREFIX = "You are Claude Code, Anthropic's official CLI for Claude.";
 
@@ -12,6 +13,12 @@ const SELECTION_SYSTEM_PROMPT = "You are an economic agent. Pick the most valuab
 
 export interface LLMClient {
   run(userMessage: string, state: AgentState): Promise<string>;
+  evaluate(
+    userMessage: string,
+    state: AgentState,
+    tools: ToolDefinition[],
+    dispatch: (name: string, input: Record<string, unknown>) => Promise<ToolResult>,
+  ): Promise<string>;
   selectTask(
     queueSummary: string,
     tools: ToolDefinition[],
@@ -152,6 +159,29 @@ export function createLLMClient(
         toolRegistry.dispatch,
         MAX_ITERATIONS,
         4096,
+      );
+    },
+
+    async evaluate(
+      userMessage: string,
+      state: AgentState,
+      tools: ToolDefinition[],
+      dispatch: (name: string, input: Record<string, unknown>) => Promise<ToolResult>,
+    ): Promise<string> {
+      const statePrefix = `<agent_state>\n${JSON.stringify(state)}\n</agent_state>\n\n`;
+      const messages: Anthropic.MessageParam[] = [
+        { role: "user", content: statePrefix + userMessage },
+      ];
+
+      const client = await getClient();
+      return toolLoop(
+        client,
+        buildSystem(systemPrompt),
+        messages,
+        tools,
+        dispatch,
+        EVALUATION_MAX_ITERATIONS,
+        1024,
       );
     },
 

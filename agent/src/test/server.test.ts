@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { createServer } from "../server.js";
 import type { Agent } from "../agent.js";
 import type { AgentConfig, Task } from "../types.js";
+import type { TaskDb } from "../db.js";
 
 const testConfig: AgentConfig = {
   id: "test-agent",
@@ -16,6 +17,11 @@ const testConfig: AgentConfig = {
   wallet_private_key: "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80",
   price: "0.05",
 };
+
+const mockDb = {
+  insertChannelMessage() {},
+  getChannelMessages() { return []; },
+} as unknown as TaskDb;
 
 function createMockAgent(): Agent {
   const tasks = new Map<string, Task>();
@@ -48,7 +54,7 @@ function createMockAgent(): Agent {
 describe("createServer", () => {
   it("returns 402 on POST /message without payment credential", async () => {
     const agent = createMockAgent();
-    const app = createServer(agent, testConfig);
+    const app = createServer(agent, testConfig, mockDb);
 
     const res = await app.request("/message", {
       method: "POST",
@@ -61,7 +67,7 @@ describe("createServer", () => {
 
   it("GET /health returns 200 without payment", async () => {
     const agent = createMockAgent();
-    const app = createServer(agent, testConfig);
+    const app = createServer(agent, testConfig, mockDb);
 
     const res = await app.request("/health");
     assert.equal(res.status, 200);
@@ -71,7 +77,7 @@ describe("createServer", () => {
 
   it("GET /tasks/:id returns 200 without payment for existing task", async () => {
     const agent = createMockAgent();
-    const app = createServer(agent, testConfig);
+    const app = createServer(agent, testConfig, mockDb);
 
     // Create a task first via the agent directly
     agent.enqueue("peer-1", "test");
@@ -84,7 +90,7 @@ describe("createServer", () => {
 
   it("GET /tasks/:id returns 404 for non-existent task", async () => {
     const agent = createMockAgent();
-    const app = createServer(agent, testConfig);
+    const app = createServer(agent, testConfig, mockDb);
 
     const res = await app.request("/tasks/nonexistent");
     assert.equal(res.status, 404);

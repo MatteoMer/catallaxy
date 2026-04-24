@@ -1,8 +1,8 @@
 import { useState, useCallback } from "react";
-import { Send, Loader2, CheckCircle, XCircle } from "lucide-react";
+import { Send, Loader2, CheckCircle, XCircle, Ban } from "lucide-react";
 import type { TopologyAgent, Mission } from "../lib/types";
 import { getRoleColor } from "../lib/types";
-import { sendMission, fetchTaskStatus } from "../lib/api";
+import { sendMessage, fetchTaskStatus } from "../lib/api";
 
 interface MissionComposerProps {
   agents: TopologyAgent[];
@@ -11,6 +11,7 @@ interface MissionComposerProps {
 export default function MissionComposer({ agents }: MissionComposerProps) {
   const [selectedAgent, setSelectedAgent] = useState("");
   const [content, setContent] = useState("");
+  const [reward, setReward] = useState("0.10");
   const [sending, setSending] = useState(false);
   const [missions, setMissions] = useState<Mission[]>([]);
 
@@ -19,12 +20,14 @@ export default function MissionComposer({ agents }: MissionComposerProps) {
   const handleSend = useCallback(async () => {
     if (!agent || !content.trim()) return;
 
+    const rewardNum = parseFloat(reward) || 0;
     setSending(true);
     try {
-      const { task_id } = await sendMission(agent.port, content.trim());
+      const { task_id } = await sendMessage(agent.port, content.trim(), rewardNum);
       const mission: Mission = {
         agentId: agent.id,
         content: content.trim(),
+        reward: rewardNum,
         taskId: task_id,
         status: "queued",
         sentAt: new Date().toISOString(),
@@ -35,14 +38,15 @@ export default function MissionComposer({ agents }: MissionComposerProps) {
       // Poll for status
       const poll = setInterval(async () => {
         try {
-          const status = await fetchTaskStatus(agent.port, task_id);
-          const taskStatus = status.status as string;
+          const task = await fetchTaskStatus(agent.port, task_id);
+          const taskStatus = task.status as string;
+          const taskResult = task.result as string | undefined;
           setMissions((prev) =>
             prev.map((m) =>
-              m.taskId === task_id ? { ...m, status: taskStatus } : m
+              m.taskId === task_id ? { ...m, status: taskStatus, result: taskResult } : m
             )
           );
-          if (taskStatus === "completed" || taskStatus === "failed") {
+          if (["completed", "failed", "rejected"].includes(taskStatus)) {
             clearInterval(poll);
           }
         } catch {
@@ -54,7 +58,7 @@ export default function MissionComposer({ agents }: MissionComposerProps) {
     } finally {
       setSending(false);
     }
-  }, [agent, content]);
+  }, [agent, content, reward]);
 
   // Group agents by role for the dropdown
   const grouped = agents.reduce<Record<string, TopologyAgent[]>>((acc, a) => {
@@ -88,6 +92,21 @@ export default function MissionComposer({ agents }: MissionComposerProps) {
             </optgroup>
           ))}
         </select>
+
+        {/* Reward */}
+        <div className="flex items-center gap-2">
+          <label className="text-xs text-[var(--text-secondary)] whitespace-nowrap">
+            Reward (pathUSD)
+          </label>
+          <input
+            type="number"
+            step="0.01"
+            min="0"
+            className="flex-1 text-sm bg-[var(--bg-base)] text-[var(--text-primary)] border border-[var(--border-subtle)] rounded-lg px-3 py-2 outline-none focus:border-[var(--role-research)]"
+            value={reward}
+            onChange={(e) => setReward(e.target.value)}
+          />
+        </div>
 
         {/* Mission content */}
         <textarea
@@ -149,6 +168,8 @@ export default function MissionComposer({ agents }: MissionComposerProps) {
                         <CheckCircle size={10} className="text-emerald-400" />
                       ) : m.status === "failed" ? (
                         <XCircle size={10} className="text-red-400" />
+                      ) : m.status === "rejected" ? (
+                        <Ban size={10} className="text-amber-400" />
                       ) : (
                         <Loader2 size={10} className="animate-spin" />
                       )}
@@ -158,6 +179,11 @@ export default function MissionComposer({ agents }: MissionComposerProps) {
                   <p className="text-[var(--text-secondary)] truncate">
                     {m.content}
                   </p>
+                  {m.result && (
+                    <p className="text-[var(--text-primary)] mt-1 whitespace-pre-wrap break-words">
+                      {m.result}
+                    </p>
+                  )}
                   {m.taskId && (
                     <p className="text-[var(--text-secondary)] font-mono mt-1 text-[10px]">
                       {m.taskId}

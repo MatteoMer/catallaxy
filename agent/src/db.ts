@@ -1,6 +1,6 @@
 import { mkdirSync } from "node:fs";
 import Database from "better-sqlite3";
-import type { Task, TaskStatus } from "./types.js";
+import type { Task, TaskStatus, ChannelMessage } from "./types.js";
 
 export interface TaskDb {
   insert(task: Task): void;
@@ -9,6 +9,8 @@ export interface TaskDb {
   listPending(): Task[];
   hasRunning(): boolean;
   resetRunning(): number;
+  insertChannelMessage(channelId: string, from: string, type: string, content: string): void;
+  getChannelMessages(channelId: string): ChannelMessage[];
 }
 
 export function openTaskDb(agentId: string): TaskDb {
@@ -32,6 +34,16 @@ export function openTaskDb(agentId: string): TaskDb {
     );
     CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks (status);
     CREATE INDEX IF NOT EXISTS idx_tasks_reward ON tasks (reward DESC);
+
+    CREATE TABLE IF NOT EXISTS channel_messages (
+      id          INTEGER PRIMARY KEY AUTOINCREMENT,
+      channel_id  TEXT NOT NULL,
+      from_agent  TEXT NOT NULL,
+      type        TEXT NOT NULL,
+      content     TEXT NOT NULL DEFAULT '',
+      created_at  TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_channel_messages_channel ON channel_messages (channel_id);
   `);
 
   const insertStmt = db.prepare(`
@@ -52,6 +64,13 @@ export function openTaskDb(agentId: string): TaskDb {
   const hasRunningStmt = db.prepare(`SELECT 1 FROM tasks WHERE status = 'running' LIMIT 1`);
 
   const resetRunningStmt = db.prepare(`UPDATE tasks SET status = 'queued', updated_at = @updated_at WHERE status = 'running'`);
+
+  const insertChannelMsgStmt = db.prepare(`
+    INSERT INTO channel_messages (channel_id, from_agent, type, content, created_at)
+    VALUES (@channel_id, @from_agent, @type, @content, @created_at)
+  `);
+
+  const getChannelMsgsStmt = db.prepare(`SELECT * FROM channel_messages WHERE channel_id = ? ORDER BY id ASC`);
 
   function rowToTask(row: Record<string, unknown>): Task {
     return {
@@ -111,6 +130,28 @@ export function openTaskDb(agentId: string): TaskDb {
     resetRunning(): number {
       const result = resetRunningStmt.run({ updated_at: new Date().toISOString() });
       return result.changes;
+    },
+
+    insertChannelMessage(channelId: string, from: string, type: string, content: string): void {
+      insertChannelMsgStmt.run({
+        channel_id: channelId,
+        from_agent: from,
+        type,
+        content,
+        created_at: new Date().toISOString(),
+      });
+    },
+
+    getChannelMessages(channelId: string): ChannelMessage[] {
+      const rows = getChannelMsgsStmt.all(channelId) as Record<string, unknown>[];
+      return rows.map((row) => ({
+        id: row.id as number,
+        channel_id: row.channel_id as string,
+        from: row.from_agent as string,
+        type: row.type as ChannelMessage["type"],
+        content: row.content as string,
+        created_at: row.created_at as string,
+      }));
     },
   };
 }

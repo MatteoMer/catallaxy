@@ -1,11 +1,17 @@
-import type { AgentConfig, ToolRegistry } from "../types.js";
+import type { AgentConfig, ToolDefinition, ToolResult, ToolRegistry } from "../types.js";
 import type { Logger } from "../logging.js";
+import type { TaskDb } from "../db.js";
 import { getBuiltinTools } from "./builtins.js";
 import { getPeerTools } from "./peers.js";
 
-export function createToolRegistry(config: AgentConfig, logger: Logger): ToolRegistry {
+export interface ToolRegistryWithPeers extends ToolRegistry {
+  peerDefinitions: ToolDefinition[];
+  peerDispatch: (name: string, input: Record<string, unknown>) => Promise<ToolResult>;
+}
+
+export function createToolRegistry(config: AgentConfig, logger: Logger, db: TaskDb): ToolRegistryWithPeers {
   const builtins = getBuiltinTools(config.tools);
-  const peers = getPeerTools(config.peers, config.id, config.url, logger, config.wallet_private_key as `0x${string}`);
+  const peers = getPeerTools(config.peers, config.id, config.url, logger, config.wallet_private_key as `0x${string}`, db);
 
   const builtinNames = new Set(builtins.definitions.map((d) => d.name));
   const peerNames = new Set(peers.definitions.map((d) => d.name));
@@ -28,5 +34,10 @@ export function createToolRegistry(config: AgentConfig, logger: Logger): ToolReg
     return result;
   };
 
-  return { definitions, dispatch };
+  return {
+    definitions,
+    dispatch,
+    peerDefinitions: peers.definitions,
+    peerDispatch: peers.dispatch,
+  };
 }

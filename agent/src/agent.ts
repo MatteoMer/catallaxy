@@ -1,18 +1,26 @@
 import { randomUUID } from "node:crypto";
-import type { AgentState, Task } from "./types.js";
+import type { AgentState, Task, ToolDefinition, ToolResult } from "./types.js";
 import type { TaskDb } from "./db.js";
 import type { LLMClient } from "./llm.js";
 import type { Logger } from "./logging.js";
 import { getTaskSelectionTools } from "./tools/tasks.js";
+import { getTriageTools } from "./tools/triage.js";
 
 export interface Agent {
   enqueue(from: string, content: string, reward?: number, replyUrl?: string): Task;
   getTask(id: string): Task | undefined;
   listPending(): Task[];
-  getState(): AgentState;
+  getState(currentTask?: Task): AgentState;
 }
 
-export function createAgent(agentId: string, db: TaskDb, llm: LLMClient, logger: Logger): Agent {
+export function createAgent(
+  agentId: string,
+  db: TaskDb,
+  llm: LLMClient,
+  logger: Logger,
+  peerDefinitions: ToolDefinition[],
+  peerDispatch: (name: string, input: Record<string, unknown>) => Promise<ToolResult>,
+): Agent {
   let busy = false;
 
   // Recover any tasks left in "running" state from a previous crash
@@ -21,20 +29,20 @@ export function createAgent(agentId: string, db: TaskDb, llm: LLMClient, logger:
     logger.log("tasks_recovered", { count: recovered });
   }
 
-  async function sendReply(task: Task): Promise<void> {
+  async function sendChannelReply(
+    task: Task,
+    type: "completed" | "failed" | "rejected",
+    content: string,
+  ): Promise<void> {
     if (!task.reply_url) return;
 
-    const content = task.status === "completed"
-      ? `Result from ${agentId} for your task (${task.id}): ${task.result}`
-      : `Error from ${agentId} for your task (${task.id}): ${task.error}`;
-
     try {
-      await fetch(`${task.reply_url}/message`, {
+      await fetch(`${task.reply_url}/channel/${task.id}`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ from: agentId, content }),
+        body: JSON.stringify({ from: agentId, type, content }),
       });
-      logger.log("reply_sent", { task_id: task.id, to: task.from, reply_url: task.reply_url });
+      logger.log("reply_sent", { task_id: task.id, to: task.from, type, reply_url: task.reply_url });
     } catch (err) {
       logger.log("reply_error", {
         task_id: task.id,
@@ -48,7 +56,39 @@ export function createAgent(agentId: string, db: TaskDb, llm: LLMClient, logger:
     db.updateStatus(task.id, "running");
     logger.log("task_started", { task_id: task.id, from: task.from, reward: task.reward });
 
-    const state = getState();
+    // Phase 1: Evaluation — should we accept this?
+    const { definitions: triageDefs, dispatch: triageDispatch, getResult: getTriageResult } = getTriageTools();
+    const triageTools = triageDefs;
+
+    const pendingCount = db.listPending().length;
+    const triagePrompt = `You received a message from "${task.from}" (reward: ${task.reward} pathUSD).
+You have ${pendingCount} pending messages in your queue.
+
+<message>
+${task.content}
+</message>
+
+Decide what to do in your own interest. You can reply to the sender or any peer to negotiate, ask questions, or decline. If you want to do the work, use the accept tool.`;
+
+    const state = getState(task);
+    logger.log("triage_start", { task_id: task.id, from: task.from, reward: task.reward, pending_count: pendingCount });
+    const evalResponse = await llm.evaluate(triagePrompt, state, triageTools, triageDispatch);
+    const triageResult = getTriageResult();
+    const accepted = !!triageResult?.accepted;
+    logger.log("triage_result", { task_id: task.id, accepted, response: evalResponse.slice(0, 500) });
+
+    if (!accepted) {
+      db.updateStatus(task.id, "rejected", { result: evalResponse });
+      logger.log("task_rejected", { task_id: task.id, from: task.from, response: evalResponse.slice(0, 300) });
+      sendChannelReply(task, "rejected", evalResponse).catch((err) => {
+        logger.log("reply_error", { task_id: task.id, error: String(err) });
+      });
+      return;
+    }
+
+    logger.log("task_accepted", { task_id: task.id, from: task.from, reward: task.reward });
+
+    // Phase 2: Execution
     try {
       const result = await llm.run(task.content, state);
       db.updateStatus(task.id, "completed", { result });
@@ -59,11 +99,17 @@ export function createAgent(agentId: string, db: TaskDb, llm: LLMClient, logger:
       logger.log("task_failed", { task_id: task.id, error });
     }
 
-    // Refresh task from DB to get updated status
+    // Notify sender via channel (lightweight, no task creation on their side)
     const updated = db.getById(task.id)!;
-    sendReply(updated).catch((err) => {
-      logger.log("reply_error", { task_id: task.id, error: String(err) });
-    });
+    if (updated.status === "completed") {
+      sendChannelReply(updated, "completed", "").catch((err) => {
+        logger.log("reply_error", { task_id: task.id, error: String(err) });
+      });
+    } else {
+      sendChannelReply(updated, "failed", updated.error ?? "Unknown error").catch((err) => {
+        logger.log("reply_error", { task_id: task.id, error: String(err) });
+      });
+    }
   }
 
   async function maybeStartSelection(): Promise<void> {
@@ -115,13 +161,14 @@ export function createAgent(agentId: string, db: TaskDb, llm: LLMClient, logger:
     }
   }
 
-  function getState(): AgentState {
+  function getState(currentTask?: Task): AgentState {
     const pending = db.listPending();
-    // Find current running task
-    // We can't easily query "running" with a prepared statement, so check busy flag
     return {
       agent_id: agentId,
       pending_task_count: pending.length,
+      current_task: currentTask
+        ? { id: currentTask.id, from: currentTask.from, content: currentTask.content, reward: currentTask.reward }
+        : undefined,
     };
   }
 
