@@ -220,6 +220,7 @@ function handlePiEvent(agent: string, line: string): void {
 
 async function runAgent(agent: string): Promise<string> {
   const prompt = await buildWakePrompt(agent);
+  console.log(`  [${agent}/wake-prompt] ${truncate(prompt, 240)}`);
 
   const model = process.env.AGENT_MODEL ?? "openrouter/z-ai/glm-5.1";
 
