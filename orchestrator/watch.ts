@@ -283,12 +283,15 @@ async function main() {
   let snapshot = await snapshotMarket();
   const lastWoken = new Map<string, number>(); // agent -> ms timestamp
 
-  // Initial wake: have agents look at the world once at startup
+  // Initial wake: have agents look at the world once at startup, in parallel
   console.log("Initial wakeup...");
-  for (const a of aliveAgents(ledger).filter((n) => agentNames.includes(n))) {
-    await wakeAgent(a, ledger);
-    lastWoken.set(a, Date.now());
-  }
+  const initial = aliveAgents(ledger).filter((n) => agentNames.includes(n));
+  await Promise.allSettled(
+    initial.map(async (a) => {
+      await wakeAgent(a, ledger);
+      lastWoken.set(a, Date.now());
+    })
+  );
   await saveLedger(ledger);
   await syncBalances(ledger);
   snapshot = await snapshotMarket();
