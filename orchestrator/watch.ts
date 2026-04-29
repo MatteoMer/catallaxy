@@ -274,6 +274,11 @@ async function main() {
   const agentNames = await discoverAgents();
   console.log(`Agents: ${agentNames.join(", ")}`);
 
+  const systemPrompt = await Bun.file(`${process.cwd()}/SYSTEM.md`)
+    .text()
+    .catch(() => "(no SYSTEM.md found)");
+  logPrefixed("orchestrator/system-prompt", systemPrompt);
+
   const ledger = await loadLedger();
   for (const name of agentNames) initAgent(ledger, name);
   await saveLedger(ledger);
