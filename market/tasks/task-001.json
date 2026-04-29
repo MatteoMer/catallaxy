@@ -1,0 +1,19 @@
+{
+  "id": "task-001",
+  "description": "Create `palindrome.py` at the repo root, exporting a function `is_palindrome(s: str) -> bool` that returns True if s reads the same forwards and backwards (case-insensitive, ignoring non-alphanumeric chars). The existing failing tests in `tests/test_palindrome.py` must pass.",
+  "repo": "/Users/matteo/projects/catallaxy/repos/playground",
+  "base_branch": "main",
+  "review_fee": 2000,
+  "deterministic_checks": [
+    {
+      "type": "command",
+      "cmd": "python3 -m unittest discover tests",
+      "must_pass": true
+    }
+  ],
+  "subjective_criteria": "Function should be readable and idiomatic. Handle Unicode correctly.",
+  "status": "open",
+  "posted_by": "operator",
+  "posted_at": "2026-04-29T09:00:00.000Z",
+  "deadline_at": "2026-05-15T18:00:00.000Z"
+}
