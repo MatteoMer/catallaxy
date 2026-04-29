@@ -191,9 +191,8 @@ async function buildWakePrompt(agent: string): Promise<string> {
   return parts.join(" ");
 }
 
-function truncate(s: string, n: number): string {
-  const flat = s.replace(/\s+/g, " ").trim();
-  return flat.length > n ? flat.slice(0, n) + "…" : flat;
+function logPrefixed(prefix: string, content: string): void {
+  for (const line of content.split("\n")) console.log(`  [${prefix}] ${line}`);
 }
 
 function handlePiEvent(agent: string, line: string): void {
@@ -208,19 +207,18 @@ function handlePiEvent(agent: string, line: string): void {
   if (ev.type !== "turn_end" || !ev.message?.content) return;
   for (const c of ev.message.content) {
     if (c.type === "thinking" && c.thinking) {
-      console.log(`  [${agent}/thinks] ${truncate(c.thinking, 240)}`);
+      logPrefixed(`${agent}/thinks`, c.thinking);
     } else if (c.type === "text" && c.text) {
-      console.log(`  [${agent}/says] ${truncate(c.text, 320)}`);
+      logPrefixed(`${agent}/says`, c.text);
     } else if (c.type === "tool_use") {
-      const input = truncate(JSON.stringify(c.input ?? {}), 200);
-      console.log(`  [${agent}/${c.name}] ${input}`);
+      logPrefixed(`${agent}/${c.name}`, JSON.stringify(c.input ?? {}));
     }
   }
 }
 
 async function runAgent(agent: string): Promise<string> {
   const prompt = await buildWakePrompt(agent);
-  console.log(`  [${agent}/wake-prompt] ${truncate(prompt, 240)}`);
+  logPrefixed(`${agent}/wake-prompt`, prompt);
 
   const model = process.env.AGENT_MODEL ?? "openrouter/z-ai/glm-5.1";
 

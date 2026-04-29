@@ -117,10 +117,8 @@ async function runReview(
 ): Promise<{ lgtm: boolean; feedback: string }> {
   const workDir = task.repo;
   const prompt = buildReviewPrompt(task, req);
-  const flat = prompt.replace(/\s+/g, " ").trim();
-  console.log(
-    `  [reviewer/prompt for ${req.agent} task ${req.task_id} #${req.seq}] ${flat.length > 240 ? flat.slice(0, 240) + "…" : flat}`
-  );
+  const tag = `reviewer/prompt for ${req.agent} task ${req.task_id} #${req.seq}`;
+  for (const line of prompt.split("\n")) console.log(`  [${tag}] ${line}`);
 
   const env = { ...process.env };
   delete env.ANTHROPIC_API_KEY;
