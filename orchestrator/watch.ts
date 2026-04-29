@@ -17,7 +17,7 @@
  *   bun orchestrator/watch.ts
  */
 
-import { readdir, stat } from "node:fs/promises";
+import { readdir, stat, stat as fsStat } from "node:fs/promises";
 import {
   loadLedger, saveLedger, initAgent, debit, syncBalances, aliveAgents,
   extractUsage, recordWakeup, recordEvent, type AgentUsage,
@@ -143,8 +143,11 @@ async function gatherWakeupContext(agent: string, since: Date) {
   }
 
   for (const f of await listJsonFiles(`${MARKET}/bids`)) {
-    const b = await readJsonOrNull(`${MARKET}/bids/${f}`, BidSchema);
-    if (b && b.agent === agent && new Date(b.created_at) >= since) {
+    const path = `${MARKET}/bids/${f}`;
+    const fileStat = await fsStat(path).catch(() => null);
+    if (!fileStat || fileStat.mtimeMs < since.getTime()) continue;
+    const b = await readJsonOrNull(path, BidSchema);
+    if (b && b.agent === agent) {
       ctx.bidsPlaced.push({
         task_id: b.task_id,
         price: b.price,
@@ -154,8 +157,11 @@ async function gatherWakeupContext(agent: string, since: Date) {
   }
 
   for (const f of await listJsonFiles(`${MARKET}/review_requests`)) {
-    const r = await readJsonOrNull(`${MARKET}/review_requests/${f}`, ReviewRequestSchema);
-    if (r && r.agent === agent && new Date(r.requested_at) >= since) {
+    const path = `${MARKET}/review_requests/${f}`;
+    const fileStat = await fsStat(path).catch(() => null);
+    if (!fileStat || fileStat.mtimeMs < since.getTime()) continue;
+    const r = await readJsonOrNull(path, ReviewRequestSchema);
+    if (r && r.agent === agent) {
       ctx.reviewsCalled.push({ task_id: r.task_id, seq: r.seq });
     }
   }

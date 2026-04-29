@@ -150,6 +150,31 @@ export async function recordWakeup(
   await appendToFile(path, lines.join("\n"));
 }
 
+/**
+ * Sum debits/credits for an agent within [fromTime, toTime].
+ * Used to produce per-task cost summaries.
+ */
+export function summarizeWindow(
+  ledger: Ledger,
+  agent: string,
+  fromTime: Date,
+  toTime: Date
+): { thinking: number; reviewFees: number; received: number; net: number } {
+  const entry = ledger[agent];
+  if (!entry) return { thinking: 0, reviewFees: 0, received: 0, net: 0 };
+  let thinking = 0;
+  let reviewFees = 0;
+  let received = 0;
+  for (const h of entry.history) {
+    const t = new Date(h.at).getTime();
+    if (t < fromTime.getTime() || t > toTime.getTime()) continue;
+    if (h.type === "debit_thinking") thinking += h.amount;
+    else if (h.type === "debit_review_fee") reviewFees += h.amount;
+    else if (h.type === "credit_bounty") received += h.amount;
+  }
+  return { thinking, reviewFees, received, net: received - thinking - reviewFees };
+}
+
 export async function recordEvent(agent: string, at: Date, message: string): Promise<void> {
   const path = `${AGENTS_DIR}/${agent}/memory/history.md`;
   const timestamp = at.toISOString().replace("T", " ").slice(0, 19);

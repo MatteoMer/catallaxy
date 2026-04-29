@@ -7,6 +7,7 @@
 
 import { readdir } from "node:fs/promises";
 import { TaskSchema, BidSchema, type Task } from "./schemas";
+import { recordEvent } from "./ledger";
 
 const MARKET = process.env.MARKET_DIR ?? "./market";
 const RESERVATIONS_PATH = process.env.RESERVATIONS_PATH ?? "./orchestrator/private/reservations.json";
@@ -79,13 +80,14 @@ export async function resolveAuctions(now: Date = new Date()): Promise<{ assigne
       console.log(
         `  ${task.id}: EXPIRED — ${taskBids.length} bid(s), none ≤ reservation ${reservation}`
       );
+      for (const b of taskBids) {
+        await recordEvent(b.agent, now, `task ${task.id} expired — your bid ${b.price} above reservation, no payment`);
+      }
       expired++;
       continue;
     }
 
     const winner = validBids[0];
-    // First-price (lowest bid wins, paid their bid). Simpler than Vickrey,
-    // gives agents real pricing pressure: you eat what you bid.
     const payment = winner.price;
 
     const assignment = {
@@ -109,6 +111,12 @@ export async function resolveAuctions(now: Date = new Date()): Promise<{ assigne
     console.log(
       `  ${task.id}: ${winner.agent} wins (paid ${payment}, reserve ${reservation}, ${validBids.length} valid bid(s))`
     );
+
+    await recordEvent(winner.agent, now, `won task ${task.id} at ${payment} (${validBids.length} valid bids)`);
+    for (const b of taskBids) {
+      if (b.agent === winner.agent) continue;
+      await recordEvent(b.agent, now, `lost task ${task.id} to ${winner.agent} at ${payment} (your bid: ${b.price})`);
+    }
     assigned++;
   }
 

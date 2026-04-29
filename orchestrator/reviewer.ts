@@ -6,7 +6,7 @@
  * Each review call debits review_fee upfront.
  */
 
-import { readdir } from "node:fs/promises";
+import { readdir, stat as fsStat } from "node:fs/promises";
 import {
   TaskSchema,
   AssignmentSchema,
@@ -15,7 +15,7 @@ import {
   type Task,
   type ReviewRequest,
 } from "./schemas";
-import { debit, credit, type Ledger } from "./ledger";
+import { debit, credit, recordEvent, summarizeWindow, type Ledger } from "./ledger";
 
 const MARKET = process.env.MARKET_DIR ?? "./market";
 
@@ -84,6 +84,18 @@ export async function processReviewRequests(ledger: Ledger, seen: Set<string>): 
           JSON.stringify(accepted, null, 2)
         );
         console.log(`  ${req.task_id}: LGTM → +${assignment.payment} to ${req.agent}`);
+
+        const closeAt = new Date();
+        const bidPath = `${MARKET}/bids/${req.task_id}-${req.agent}.json`;
+        const bidStat = await fsStat(bidPath).catch(() => null);
+        const fromTime = bidStat ? new Date(bidStat.mtimeMs) : new Date(req.requested_at);
+        const s = summarizeWindow(ledger, req.agent, fromTime, closeAt);
+        const totalCost = s.thinking + s.reviewFees;
+        await recordEvent(
+          req.agent,
+          closeAt,
+          `task ${req.task_id} accepted — paid ${s.received}, cost ${totalCost} (thinking ${s.thinking}, review fees ${s.reviewFees}), net ${s.net}`
+        );
       } else {
         console.log(`  ${req.task_id}: needs_work (#${req.seq})`);
       }
