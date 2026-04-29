@@ -16,7 +16,7 @@ export const TaskSchema = z.object({
   review_fee: z.number().int().positive(),
   deterministic_checks: z.array(DeterministicCheckSchema).default([]),
   subjective_criteria: z.string().optional(),
-  status: z.enum(["open", "assigned", "accepted", "expired"]),
+  status: z.enum(["open", "assigned", "completed", "expired"]),
   posted_by: z.string(),
   posted_at: Timestamp,
   deadline_at: Timestamp,

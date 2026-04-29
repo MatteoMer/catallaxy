@@ -191,6 +191,33 @@ async function buildWakePrompt(agent: string): Promise<string> {
   return parts.join(" ");
 }
 
+function truncate(s: string, n: number): string {
+  const flat = s.replace(/\s+/g, " ").trim();
+  return flat.length > n ? flat.slice(0, n) + "…" : flat;
+}
+
+function handlePiEvent(agent: string, line: string): void {
+  const trimmed = line.trim();
+  if (!trimmed) return;
+  let ev: any;
+  try {
+    ev = JSON.parse(trimmed);
+  } catch {
+    return;
+  }
+  if (ev.type !== "turn_end" || !ev.message?.content) return;
+  for (const c of ev.message.content) {
+    if (c.type === "thinking" && c.thinking) {
+      console.log(`  [${agent}/thinks] ${truncate(c.thinking, 240)}`);
+    } else if (c.type === "text" && c.text) {
+      console.log(`  [${agent}/says] ${truncate(c.text, 320)}`);
+    } else if (c.type === "tool_use") {
+      const input = truncate(JSON.stringify(c.input ?? {}), 200);
+      console.log(`  [${agent}/${c.name}] ${input}`);
+    }
+  }
+}
+
 async function runAgent(agent: string): Promise<string> {
   const prompt = await buildWakePrompt(agent);
 
@@ -205,13 +232,28 @@ async function runAgent(agent: string): Promise<string> {
     "--no-session",
   ], { cwd: process.cwd(), stdout: "pipe", stderr: "pipe" });
 
-  const output = await new Response(proc.stdout).text();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  let captured = "";
+
+  for await (const chunk of proc.stdout as AsyncIterable<Uint8Array>) {
+    const text = decoder.decode(chunk, { stream: true });
+    captured += text;
+    buffer += text;
+    let idx: number;
+    while ((idx = buffer.indexOf("\n")) >= 0) {
+      handlePiEvent(agent, buffer.slice(0, idx));
+      buffer = buffer.slice(idx + 1);
+    }
+  }
+  if (buffer.length) handlePiEvent(agent, buffer);
+
   const stderr = await new Response(proc.stderr).text();
   const exitCode = await proc.exited;
   if (exitCode !== 0) {
     console.error(`  [${agent}] exit ${exitCode}: ${stderr.slice(0, 200)}`);
   }
-  return output;
+  return captured;
 }
 
 async function wakeAgent(agent: string, ledger: any): Promise<void> {

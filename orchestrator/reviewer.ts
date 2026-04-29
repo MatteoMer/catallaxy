@@ -78,10 +78,10 @@ export async function processReviewRequests(ledger: Ledger, seen: Set<string>): 
 
       if (result.lgtm) {
         credit(ledger, req.agent, assignment.payment, `Accepted: ${req.task_id}`);
-        const accepted: Task = { ...task, status: "accepted" };
+        const completed: Task = { ...task, status: "completed" };
         await Bun.write(
           `${MARKET}/tasks/${req.task_id}.json`,
-          JSON.stringify(accepted, null, 2)
+          JSON.stringify(completed, null, 2)
         );
         console.log(`  ${req.task_id}: LGTM → +${assignment.payment} to ${req.agent}`);
 
@@ -94,7 +94,7 @@ export async function processReviewRequests(ledger: Ledger, seen: Set<string>): 
         await recordEvent(
           req.agent,
           closeAt,
-          `task ${req.task_id} accepted — paid ${s.received}, cost ${totalCost} (thinking ${s.thinking}, review fees ${s.reviewFees}), net ${s.net}`
+          `task ${req.task_id} completed — paid ${s.received}, cost ${totalCost} (thinking ${s.thinking}, review fees ${s.reviewFees}), net ${s.net}`
         );
       } else {
         console.log(`  ${req.task_id}: needs_work (#${req.seq})`);
