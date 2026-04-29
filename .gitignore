@@ -1,0 +1,23 @@
+.DS_Store
+.env
+.env.local
+node_modules/
+dashboard/
+repos/
+/tmp/
+
+# Runtime market state
+market/bids/
+market/assignments/
+market/review_requests/
+market/review_responses/
+
+# Per-agent runtime state (template scaffolding tracked)
+agents/*/balance.json
+!agents/_template/balance.json
+agents/*/memory/
+agents/*/work/
+
+# Orchestrator state
+orchestrator/ledger.json
+orchestrator/private/
