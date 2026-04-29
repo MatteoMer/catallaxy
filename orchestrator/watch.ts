@@ -169,26 +169,56 @@ async function gatherWakeupContext(agent: string, since: Date) {
   return ctx;
 }
 
+function formatRelative(now: Date, target: Date): string {
+  const diffMs = target.getTime() - now.getTime();
+  const abs = Math.abs(diffMs);
+  const past = diffMs < 0;
+  let value: string;
+  if (abs < 60_000) value = `${Math.max(1, Math.round(abs / 1000))}s`;
+  else if (abs < 3_600_000) value = `${Math.round(abs / 60_000)}m`;
+  else if (abs < 86_400_000) value = `${Math.round(abs / 3_600_000)}h`;
+  else value = `${Math.round(abs / 86_400_000)}d`;
+  return past ? `${value} ago` : `in ${value}`;
+}
+
 async function buildWakePrompt(agent: string): Promise<string> {
-  const tasks: { id: string; status: string }[] = [];
+  const now = new Date();
+  type TaskInfo = { id: string; status: string; description: string; review_fee: number; deadline_at: string };
+  const tasks: TaskInfo[] = [];
   for (const f of await listJsonFiles(`${MARKET}/tasks`)) {
     const t = await readJsonOrNull(`${MARKET}/tasks/${f}`, TaskSchema);
-    if (t) tasks.push({ id: t.id, status: t.status });
+    if (t) tasks.push({ id: t.id, status: t.status, description: t.description, review_fee: t.review_fee, deadline_at: t.deadline_at });
   }
-  const open = tasks.filter((t) => t.status === "open").map((t) => t.id);
+  const open = tasks.filter((t) => t.status === "open");
 
-  const assignedToMe: string[] = [];
+  const assignedToMe: TaskInfo[] = [];
   for (const f of await listJsonFiles(`${MARKET}/assignments`)) {
     const a = await readJsonOrNull(`${MARKET}/assignments/${f}`, AssignmentSchema);
     if (!a || a.winner !== agent) continue;
     const task = tasks.find((t) => t.id === a.task_id);
-    if (task && task.status === "assigned") assignedToMe.push(a.task_id);
+    if (task && task.status === "assigned") assignedToMe.push(task);
   }
 
-  const parts = [`Wakeup. You are ${agent}.`];
-  parts.push(`Open tasks: ${open.length ? open.join(", ") : "none"}.`);
-  if (assignedToMe.length) parts.push(`Assigned to you: ${assignedToMe.join(", ")}.`);
-  return parts.join(" ");
+  const lines: string[] = [];
+  lines.push(`Wakeup at ${now.toISOString()} (UTC). You are ${agent}.`);
+  if (open.length) {
+    lines.push("Open tasks:");
+    for (const t of open) {
+      const desc = t.description.length > 90 ? t.description.slice(0, 90) + "…" : t.description;
+      const deadline = new Date(t.deadline_at);
+      lines.push(`- ${t.id} | fee ${t.review_fee} | deadline ${t.deadline_at} (${formatRelative(now, deadline)}) | ${desc}`);
+    }
+  } else {
+    lines.push("Open tasks: none.");
+  }
+  if (assignedToMe.length) {
+    lines.push("Assigned to you:");
+    for (const t of assignedToMe) {
+      const desc = t.description.length > 90 ? t.description.slice(0, 90) + "…" : t.description;
+      lines.push(`- ${t.id} | ${desc}`);
+    }
+  }
+  return lines.join("\n");
 }
 
 function logPrefixed(prefix: string, content: string): void {

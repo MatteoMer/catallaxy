@@ -137,7 +137,7 @@ export async function recordWakeup(
 
   const timestamp = at.toISOString().replace("T", " ").slice(0, 19);
   lines.push(`### ${timestamp} — wakeup`);
-  lines.push(`Tokens: ${usage.totalTokens.toLocaleString()} (in ${usage.inputTokens.toLocaleString()}, out ${usage.outputTokens.toLocaleString()}, cache ${usage.cacheReadTokens.toLocaleString()}) — $${usage.costUsd.toFixed(4)}`);
+  lines.push(`Wakeup cost: ${usage.totalTokens.toLocaleString()} tokens deducted from balance (in ${usage.inputTokens.toLocaleString()}, out ${usage.outputTokens.toLocaleString()}, cache ${usage.cacheReadTokens.toLocaleString()}) — $${usage.costUsd.toFixed(4)}`);
   for (const b of context.bidsPlaced) {
     const desc = b.description.length > 80 ? b.description.slice(0, 80) + "…" : b.description;
     lines.push(`- bid **${b.price.toLocaleString()}** on ${b.task_id} (${desc})`);
