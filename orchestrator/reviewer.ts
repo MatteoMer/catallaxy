@@ -6,7 +6,7 @@
  * Each review call debits review_fee upfront.
  */
 
-import { readdir } from "node:fs/promises";
+import { readdir, stat as fsStat } from "node:fs/promises";
 import {
   TaskSchema,
   AssignmentSchema,
@@ -15,7 +15,7 @@ import {
   type Task,
   type ReviewRequest,
 } from "./schemas";
-import { debit, credit, type Ledger } from "./ledger";
+import { debit, credit, recordEvent, summarizeWindow, type Ledger } from "./ledger";
 
 const MARKET = process.env.MARKET_DIR ?? "./market";
 
@@ -78,12 +78,24 @@ export async function processReviewRequests(ledger: Ledger, seen: Set<string>): 
 
       if (result.lgtm) {
         credit(ledger, req.agent, assignment.payment, `Accepted: ${req.task_id}`);
-        const accepted: Task = { ...task, status: "accepted" };
+        const completed: Task = { ...task, status: "completed" };
         await Bun.write(
           `${MARKET}/tasks/${req.task_id}.json`,
-          JSON.stringify(accepted, null, 2)
+          JSON.stringify(completed, null, 2)
         );
         console.log(`  ${req.task_id}: LGTM → +${assignment.payment} to ${req.agent}`);
+
+        const closeAt = new Date();
+        const bidPath = `${MARKET}/bids/${req.task_id}-${req.agent}.json`;
+        const bidStat = await fsStat(bidPath).catch(() => null);
+        const fromTime = bidStat ? new Date(bidStat.mtimeMs) : new Date(req.requested_at);
+        const s = summarizeWindow(ledger, req.agent, fromTime, closeAt);
+        const totalCost = s.thinking + s.reviewFees;
+        await recordEvent(
+          req.agent,
+          closeAt,
+          `task ${req.task_id} completed — paid ${s.received}, cost ${totalCost} (thinking ${s.thinking}, review fees ${s.reviewFees}), net ${s.net}`
+        );
       } else {
         console.log(`  ${req.task_id}: needs_work (#${req.seq})`);
       }
@@ -105,6 +117,8 @@ async function runReview(
 ): Promise<{ lgtm: boolean; feedback: string }> {
   const workDir = task.repo;
   const prompt = buildReviewPrompt(task, req);
+  const tag = `reviewer/prompt for ${req.agent} task ${req.task_id} #${req.seq}`;
+  for (const line of prompt.split("\n")) console.log(`  [${tag}] ${line}`);
 
   const env = { ...process.env };
   delete env.ANTHROPIC_API_KEY;

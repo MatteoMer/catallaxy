@@ -17,7 +17,7 @@
  *   bun orchestrator/watch.ts
  */
 
-import { readdir, stat } from "node:fs/promises";
+import { readdir, stat, stat as fsStat } from "node:fs/promises";
 import {
   loadLedger, saveLedger, initAgent, debit, syncBalances, aliveAgents,
   extractUsage, recordWakeup, recordEvent, type AgentUsage,
@@ -143,8 +143,11 @@ async function gatherWakeupContext(agent: string, since: Date) {
   }
 
   for (const f of await listJsonFiles(`${MARKET}/bids`)) {
-    const b = await readJsonOrNull(`${MARKET}/bids/${f}`, BidSchema);
-    if (b && b.agent === agent && new Date(b.created_at) >= since) {
+    const path = `${MARKET}/bids/${f}`;
+    const fileStat = await fsStat(path).catch(() => null);
+    if (!fileStat || fileStat.mtimeMs < since.getTime()) continue;
+    const b = await readJsonOrNull(path, BidSchema);
+    if (b && b.agent === agent) {
       ctx.bidsPlaced.push({
         task_id: b.task_id,
         price: b.price,
@@ -154,8 +157,11 @@ async function gatherWakeupContext(agent: string, since: Date) {
   }
 
   for (const f of await listJsonFiles(`${MARKET}/review_requests`)) {
-    const r = await readJsonOrNull(`${MARKET}/review_requests/${f}`, ReviewRequestSchema);
-    if (r && r.agent === agent && new Date(r.requested_at) >= since) {
+    const path = `${MARKET}/review_requests/${f}`;
+    const fileStat = await fsStat(path).catch(() => null);
+    if (!fileStat || fileStat.mtimeMs < since.getTime()) continue;
+    const r = await readJsonOrNull(path, ReviewRequestSchema);
+    if (r && r.agent === agent) {
       ctx.reviewsCalled.push({ task_id: r.task_id, seq: r.seq });
     }
   }
@@ -163,30 +169,86 @@ async function gatherWakeupContext(agent: string, since: Date) {
   return ctx;
 }
 
+function formatRelative(now: Date, target: Date): string {
+  const diffMs = target.getTime() - now.getTime();
+  const abs = Math.abs(diffMs);
+  const past = diffMs < 0;
+  let value: string;
+  if (abs < 60_000) value = `${Math.max(1, Math.round(abs / 1000))}s`;
+  else if (abs < 3_600_000) value = `${Math.round(abs / 60_000)}m`;
+  else if (abs < 86_400_000) value = `${Math.round(abs / 3_600_000)}h`;
+  else value = `${Math.round(abs / 86_400_000)}d`;
+  return past ? `${value} ago` : `in ${value}`;
+}
+
 async function buildWakePrompt(agent: string): Promise<string> {
-  const tasks: { id: string; status: string }[] = [];
+  const now = new Date();
+  type TaskInfo = { id: string; status: string; description: string; review_fee: number; deadline_at: string };
+  const tasks: TaskInfo[] = [];
   for (const f of await listJsonFiles(`${MARKET}/tasks`)) {
     const t = await readJsonOrNull(`${MARKET}/tasks/${f}`, TaskSchema);
-    if (t) tasks.push({ id: t.id, status: t.status });
+    if (t) tasks.push({ id: t.id, status: t.status, description: t.description, review_fee: t.review_fee, deadline_at: t.deadline_at });
   }
-  const open = tasks.filter((t) => t.status === "open").map((t) => t.id);
+  const open = tasks.filter((t) => t.status === "open");
 
-  const assignedToMe: string[] = [];
+  const assignedToMe: TaskInfo[] = [];
   for (const f of await listJsonFiles(`${MARKET}/assignments`)) {
     const a = await readJsonOrNull(`${MARKET}/assignments/${f}`, AssignmentSchema);
     if (!a || a.winner !== agent) continue;
     const task = tasks.find((t) => t.id === a.task_id);
-    if (task && task.status === "assigned") assignedToMe.push(a.task_id);
+    if (task && task.status === "assigned") assignedToMe.push(task);
   }
 
-  const parts = [`Wakeup. You are ${agent}.`];
-  parts.push(`Open tasks: ${open.length ? open.join(", ") : "none"}.`);
-  if (assignedToMe.length) parts.push(`Assigned to you: ${assignedToMe.join(", ")}.`);
-  return parts.join(" ");
+  const lines: string[] = [];
+  lines.push(`Wakeup at ${now.toISOString()} (UTC). You are ${agent}.`);
+  if (open.length) {
+    lines.push("Open tasks:");
+    for (const t of open) {
+      const desc = t.description.length > 90 ? t.description.slice(0, 90) + "…" : t.description;
+      const deadline = new Date(t.deadline_at);
+      lines.push(`- ${t.id} | fee ${t.review_fee} | deadline ${t.deadline_at} (${formatRelative(now, deadline)}) | ${desc}`);
+    }
+  } else {
+    lines.push("Open tasks: none.");
+  }
+  if (assignedToMe.length) {
+    lines.push("Assigned to you:");
+    for (const t of assignedToMe) {
+      const desc = t.description.length > 90 ? t.description.slice(0, 90) + "…" : t.description;
+      lines.push(`- ${t.id} | ${desc}`);
+    }
+  }
+  return lines.join("\n");
+}
+
+function logPrefixed(prefix: string, content: string): void {
+  for (const line of content.split("\n")) console.log(`  [${prefix}] ${line}`);
+}
+
+function handlePiEvent(agent: string, line: string): void {
+  const trimmed = line.trim();
+  if (!trimmed) return;
+  let ev: any;
+  try {
+    ev = JSON.parse(trimmed);
+  } catch {
+    return;
+  }
+  if (ev.type !== "turn_end" || !ev.message?.content) return;
+  for (const c of ev.message.content) {
+    if (c.type === "thinking" && c.thinking) {
+      logPrefixed(`${agent}/thinks`, c.thinking);
+    } else if (c.type === "text" && c.text) {
+      logPrefixed(`${agent}/says`, c.text);
+    } else if (c.type === "tool_use") {
+      logPrefixed(`${agent}/${c.name}`, JSON.stringify(c.input ?? {}));
+    }
+  }
 }
 
 async function runAgent(agent: string): Promise<string> {
   const prompt = await buildWakePrompt(agent);
+  logPrefixed(`${agent}/wake-prompt`, prompt);
 
   const model = process.env.AGENT_MODEL ?? "openrouter/z-ai/glm-5.1";
 
@@ -199,13 +261,28 @@ async function runAgent(agent: string): Promise<string> {
     "--no-session",
   ], { cwd: process.cwd(), stdout: "pipe", stderr: "pipe" });
 
-  const output = await new Response(proc.stdout).text();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  let captured = "";
+
+  for await (const chunk of proc.stdout as AsyncIterable<Uint8Array>) {
+    const text = decoder.decode(chunk, { stream: true });
+    captured += text;
+    buffer += text;
+    let idx: number;
+    while ((idx = buffer.indexOf("\n")) >= 0) {
+      handlePiEvent(agent, buffer.slice(0, idx));
+      buffer = buffer.slice(idx + 1);
+    }
+  }
+  if (buffer.length) handlePiEvent(agent, buffer);
+
   const stderr = await new Response(proc.stderr).text();
   const exitCode = await proc.exited;
   if (exitCode !== 0) {
     console.error(`  [${agent}] exit ${exitCode}: ${stderr.slice(0, 200)}`);
   }
-  return output;
+  return captured;
 }
 
 async function wakeAgent(agent: string, ledger: any): Promise<void> {
@@ -227,6 +304,11 @@ async function main() {
   const agentNames = await discoverAgents();
   console.log(`Agents: ${agentNames.join(", ")}`);
 
+  const systemPrompt = await Bun.file(`${process.cwd()}/SYSTEM.md`)
+    .text()
+    .catch(() => "(no SYSTEM.md found)");
+  logPrefixed("orchestrator/system-prompt", systemPrompt);
+
   const ledger = await loadLedger();
   for (const name of agentNames) initAgent(ledger, name);
   await saveLedger(ledger);
@@ -236,12 +318,15 @@ async function main() {
   let snapshot = await snapshotMarket();
   const lastWoken = new Map<string, number>(); // agent -> ms timestamp
 
-  // Initial wake: have agents look at the world once at startup
+  // Initial wake: have agents look at the world once at startup, in parallel
   console.log("Initial wakeup...");
-  for (const a of aliveAgents(ledger).filter((n) => agentNames.includes(n))) {
-    await wakeAgent(a, ledger);
-    lastWoken.set(a, Date.now());
-  }
+  const initial = aliveAgents(ledger).filter((n) => agentNames.includes(n));
+  await Promise.allSettled(
+    initial.map(async (a) => {
+      await wakeAgent(a, ledger);
+      lastWoken.set(a, Date.now());
+    })
+  );
   await saveLedger(ledger);
   await syncBalances(ledger);
   snapshot = await snapshotMarket();

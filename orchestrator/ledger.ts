@@ -137,7 +137,7 @@ export async function recordWakeup(
 
   const timestamp = at.toISOString().replace("T", " ").slice(0, 19);
   lines.push(`### ${timestamp} — wakeup`);
-  lines.push(`Tokens: ${usage.totalTokens.toLocaleString()} (in ${usage.inputTokens.toLocaleString()}, out ${usage.outputTokens.toLocaleString()}, cache ${usage.cacheReadTokens.toLocaleString()}) — $${usage.costUsd.toFixed(4)}`);
+  lines.push(`Wakeup cost: ${usage.totalTokens.toLocaleString()} tokens deducted from balance (in ${usage.inputTokens.toLocaleString()}, out ${usage.outputTokens.toLocaleString()}, cache ${usage.cacheReadTokens.toLocaleString()}) — $${usage.costUsd.toFixed(4)}`);
   for (const b of context.bidsPlaced) {
     const desc = b.description.length > 80 ? b.description.slice(0, 80) + "…" : b.description;
     lines.push(`- bid **${b.price.toLocaleString()}** on ${b.task_id} (${desc})`);
@@ -148,6 +148,31 @@ export async function recordWakeup(
   lines.push("");
 
   await appendToFile(path, lines.join("\n"));
+}
+
+/**
+ * Sum debits/credits for an agent within [fromTime, toTime].
+ * Used to produce per-task cost summaries.
+ */
+export function summarizeWindow(
+  ledger: Ledger,
+  agent: string,
+  fromTime: Date,
+  toTime: Date
+): { thinking: number; reviewFees: number; received: number; net: number } {
+  const entry = ledger[agent];
+  if (!entry) return { thinking: 0, reviewFees: 0, received: 0, net: 0 };
+  let thinking = 0;
+  let reviewFees = 0;
+  let received = 0;
+  for (const h of entry.history) {
+    const t = new Date(h.at).getTime();
+    if (t < fromTime.getTime() || t > toTime.getTime()) continue;
+    if (h.type === "debit_thinking") thinking += h.amount;
+    else if (h.type === "debit_review_fee") reviewFees += h.amount;
+    else if (h.type === "credit_bounty") received += h.amount;
+  }
+  return { thinking, reviewFees, received, net: received - thinking - reviewFees };
 }
 
 export async function recordEvent(agent: string, at: Date, message: string): Promise<void> {
