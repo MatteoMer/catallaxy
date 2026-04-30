@@ -1,27 +1,25 @@
 /**
- * Watch — long-running orchestrator. No rounds.
+ * Watch — long-running event-driven orchestrator.
  *
- * Loop forever:
- *   - Settle any auctions whose deadline has passed
- *   - Process any new reviews
- *   - Detect changes in /market/ and wake interested agents
- *   - Each agent wakeup runs `pi -p` once, debits token cost, records to history
+ * Auction settlement: setTimeout per open task fires at deadline_at exactly
+ * (no polling lag).
+ * Wake triggers: fs.watch on /market/{tasks,bids,assignments,review_requests,
+ *   review_responses}/. New files dispatch to per-event handlers that wake
+ *   relevant agents or call processReviewRequests.
+ * Wake debounce: at most one wake per agent in flight; multiple events
+ *   coalesce into a single follow-up; MIN_WAKE_INTERVAL_MS between wakes.
+ * Reconciler: periodic safety net (every RECONCILE_MS) re-schedules timers
+ *   and re-runs settlement / review processing in case the watcher missed
+ *   an event (macOS fs.watch is occasionally unreliable on renames).
  *
- * Agent wake triggers:
- *   - New open task they haven't bid on
- *   - Bid changed on a task they've bid on (price war)
- *   - New assignment they won
- *   - New review on something they submitted
- *
- * Usage:
- *   bun orchestrator/watch.ts
+ * Usage: bun orchestrator/watch.ts
  */
 
-import { readdir, stat, stat as fsStat, mkdir, rename, symlink, lstat, rm } from "node:fs/promises";
-import { existsSync } from "node:fs";
+import { readdir, stat as fsStat, mkdir, rename, symlink, lstat, rm } from "node:fs/promises";
+import { existsSync, watch } from "node:fs";
 import {
   loadLedger, saveLedger, initAgent, debit, syncBalances, aliveAgents,
-  extractUsage, recordWakeup, recordEvent, type AgentUsage,
+  extractUsage, recordWakeup, recordEvent, type AgentUsage, type Ledger,
 } from "./ledger";
 import { resolveAuctions } from "./exchange";
 import { processReviewRequests } from "./reviewer";
@@ -29,8 +27,8 @@ import { TaskSchema, BidSchema, AssignmentSchema, ReviewRequestSchema, ReviewRes
 
 const AGENTS_DIR = process.env.AGENTS_DIR ?? "./agents";
 const MARKET = process.env.MARKET_DIR ?? "./market";
-const TICK_MS = parseInt(process.env.TICK_MS ?? "3000", 10);
 const MIN_WAKE_INTERVAL_MS = parseInt(process.env.MIN_WAKE_INTERVAL_MS ?? "5000", 10);
+const RECONCILE_MS = parseInt(process.env.RECONCILE_MS ?? "60000", 10);
 
 async function discoverAgents(): Promise<string[]> {
   const entries = await readdir(AGENTS_DIR, { withFileTypes: true });
@@ -59,7 +57,6 @@ async function ensureSandbox(agent: string): Promise<void> {
     await rename(parentIdentity, sandboxIdentity);
   }
 
-  // Clean up stale parent-level runtime files from the pre-sandbox layout.
   for (const stale of ["balance.json", "memory", "work"]) {
     const path = `${agentDir}/${stale}`;
     if (existsSync(path)) await rm(path, { recursive: true, force: true });
@@ -99,81 +96,6 @@ async function listJsonFiles(dir: string): Promise<string[]> {
   } catch {
     return [];
   }
-}
-
-async function fileSig(path: string): Promise<string> {
-  try {
-    const s = await stat(path);
-    return `${s.size}:${s.mtimeMs}`;
-  } catch {
-    return "missing";
-  }
-}
-
-/**
- * Capture a snapshot of the market state. Used to detect changes between ticks.
- */
-async function snapshotMarket(): Promise<Map<string, string>> {
-  const sig = new Map<string, string>();
-  for (const dir of ["tasks", "bids", "assignments", "review_requests", "review_responses"]) {
-    const files = await listJsonFiles(`${MARKET}/${dir}`);
-    for (const f of files) {
-      sig.set(`${dir}/${f}`, await fileSig(`${MARKET}/${dir}/${f}`));
-    }
-  }
-  return sig;
-}
-
-function diffSnapshots(prev: Map<string, string>, next: Map<string, string>): { added: string[]; changed: string[] } {
-  const added: string[] = [];
-  const changed: string[] = [];
-  for (const [k, v] of next) {
-    if (!prev.has(k)) added.push(k);
-    else if (prev.get(k) !== v) changed.push(k);
-  }
-  return { added, changed };
-}
-
-/**
- * Decide which agents should wake based on market changes.
- */
-async function agentsToWake(
-  agents: string[],
-  changes: { added: string[]; changed: string[] }
-): Promise<Set<string>> {
-  const wakers = new Set<string>();
-  const all = [...changes.added, ...changes.changed];
-  if (all.length === 0) return wakers;
-
-  for (const path of all) {
-    if (path.startsWith("tasks/")) {
-      // New or changed task: wake everyone (they may want to bid)
-      agents.forEach((a) => wakers.add(a));
-    } else if (path.startsWith("bids/")) {
-      // Bid change: wake any agent who has bid on this task (price war)
-      const bid = await readJsonOrNull(`${MARKET}/${path}`, BidSchema);
-      if (!bid) continue;
-      // Wake any agent except the one who just bid
-      const allBids = await listJsonFiles(`${MARKET}/bids`);
-      const interested = new Set<string>();
-      for (const f of allBids) {
-        const b = await readJsonOrNull(`${MARKET}/bids/${f}`, BidSchema);
-        if (b && b.task_id === bid.task_id) interested.add(b.agent);
-      }
-      // Plus anyone who hasn't bid yet (they may want to)
-      agents.forEach((a) => {
-        if (a !== bid.agent && (interested.has(a) || true)) wakers.add(a);
-      });
-    } else if (path.startsWith("assignments/")) {
-      const a = await readJsonOrNull(`${MARKET}/${path}`, AssignmentSchema);
-      if (a) wakers.add(a.winner);
-    } else if (path.startsWith("review_responses/")) {
-      const r = await readJsonOrNull(`${MARKET}/${path}`, ReviewResponseSchema);
-      if (!r) continue;
-      wakers.add(r.agent);
-    }
-  }
-  return wakers;
 }
 
 async function gatherWakeupContext(agent: string, since: Date) {
@@ -331,7 +253,7 @@ async function runAgent(agent: string): Promise<string> {
   return captured;
 }
 
-async function wakeAgent(agent: string, ledger: any): Promise<void> {
+async function wakeAgent(agent: string, ledger: Ledger): Promise<void> {
   const at = new Date();
   console.log(`  → waking ${agent} at ${at.toISOString().slice(11, 19)}`);
   const output = await runAgent(agent);
@@ -345,7 +267,7 @@ async function wakeAgent(agent: string, ledger: any): Promise<void> {
 }
 
 async function main() {
-  console.log(`Catallaxy watcher: tick ${TICK_MS}ms, min wake interval ${MIN_WAKE_INTERVAL_MS}ms`);
+  console.log(`Catallaxy watcher: event-driven (min wake interval ${MIN_WAKE_INTERVAL_MS}ms, reconcile every ${RECONCILE_MS}ms)`);
 
   const agentNames = await discoverAgents();
   console.log(`Agents: ${agentNames.join(", ")}`);
@@ -362,76 +284,208 @@ async function main() {
   await saveLedger(ledger);
   await syncBalances(ledger);
 
+  // Ensure market subdirs exist before fs.watch attaches
+  for (const sub of ["tasks", "bids", "assignments", "review_requests", "review_responses"]) {
+    await mkdir(`${MARKET}/${sub}`, { recursive: true });
+  }
+
   const seenReviewRequests = new Set<string>();
-  let snapshot = await snapshotMarket();
-  const lastWoken = new Map<string, number>(); // agent -> ms timestamp
+  const deadlineTimers = new Map<string, ReturnType<typeof setTimeout>>();
+  const wakeStatus = new Map<string, "running" | "pending">();
+  const lastWoken = new Map<string, number>();
 
-  // Initial wake: have agents look at the world once at startup, in parallel
-  console.log("Initial wakeup...");
-  const initial = aliveAgents(ledger).filter((n) => agentNames.includes(n));
-  await Promise.allSettled(
-    initial.map(async (a) => {
-      await wakeAgent(a, ledger);
-      lastWoken.set(a, Date.now());
-    })
-  );
-  await saveLedger(ledger);
-  await syncBalances(ledger);
-  snapshot = await snapshotMarket();
+  const persist = async () => {
+    await saveLedger(ledger);
+    await syncBalances(ledger);
+  };
 
-  // Two concurrent loops so settlement and review processing keep ticking
-  // even when agent wakes are slow.
-  const settleLoop = async () => {
-    while (true) {
-      await Bun.sleep(TICK_MS);
+  const checkBankrupt = async () => {
+    for (const agent of agentNames) {
+      const bal = ledger[agent]?.balance ?? 0;
+      if (bal <= 0) await recordEvent(agent, new Date(), "BANKRUPT — balance hit 0");
+    }
+  };
+
+  /**
+   * Coalescing wake trigger:
+   * - At most one wake in flight per agent.
+   * - Multiple triggers during a wake collapse into a single follow-up.
+   * - Respects MIN_WAKE_INTERVAL_MS between consecutive wakes.
+   * - Never throws.
+   */
+  const triggerWake = async (agent: string): Promise<void> => {
+    if (!agentNames.includes(agent)) return;
+    if ((ledger[agent]?.balance ?? 0) <= 0) return;
+
+    const status = wakeStatus.get(agent);
+    if (status === "pending") return;
+    if (status === "running") {
+      wakeStatus.set(agent, "pending");
+      return;
+    }
+
+    const wait = Math.max(0, MIN_WAKE_INTERVAL_MS - (Date.now() - (lastWoken.get(agent) ?? 0)));
+    if (wait > 0) {
+      setTimeout(() => { triggerWake(agent); }, wait);
+      return;
+    }
+
+    wakeStatus.set(agent, "running");
+    try {
+      await wakeAgent(agent, ledger);
+      lastWoken.set(agent, Date.now());
+      await persist();
+      await checkBankrupt();
+    } catch (e) {
+      console.error(`wake error for ${agent}:`, e);
+    } finally {
+      const wasPending = wakeStatus.get(agent) === "pending";
+      wakeStatus.delete(agent);
+      if (wasPending) triggerWake(agent);
+    }
+  };
+
+  const settleAndPersist = async () => {
+    try {
       const r = await resolveAuctions();
       if (r.assigned + r.expired > 0) {
         console.log(`Settled: ${r.assigned} assigned, ${r.expired} expired`);
       }
+    } catch (e) {
+      console.error("resolveAuctions error:", e);
+    }
+    await persist();
+  };
+
+  const scheduleDeadline = (task: { id: string; deadline_at: string; status: string }) => {
+    const existing = deadlineTimers.get(task.id);
+    if (existing) clearTimeout(existing);
+    if (task.status !== "open") {
+      deadlineTimers.delete(task.id);
+      return;
+    }
+    const ms = Math.max(0, new Date(task.deadline_at).getTime() - Date.now());
+    const t = setTimeout(async () => {
+      deadlineTimers.delete(task.id);
+      await settleAndPersist();
+    }, ms);
+    deadlineTimers.set(task.id, t);
+    console.log(`scheduled settle for ${task.id} ${formatRelative(new Date(), new Date(task.deadline_at))}`);
+  };
+
+  // Watcher infrastructure
+  const knownFiles = new Map<string, Set<string>>();
+
+  const handleAdded = async (subdir: string, file: string): Promise<void> => {
+    const fullPath = `${MARKET}/${subdir}/${file}`;
+    if (subdir === "tasks") {
+      const t = await readJsonOrNull(fullPath, TaskSchema);
+      if (!t) return;
+      console.log(`new task: ${t.id}`);
+      scheduleDeadline(t);
+      for (const a of agentNames) triggerWake(a);
+    } else if (subdir === "bids") {
+      const b = await readJsonOrNull(fullPath, BidSchema);
+      if (!b) return;
+      for (const a of agentNames) {
+        if (a !== b.agent) triggerWake(a);
+      }
+    } else if (subdir === "assignments") {
+      const a = await readJsonOrNull(fullPath, AssignmentSchema);
+      if (!a) return;
+      triggerWake(a.winner);
+    } else if (subdir === "review_requests") {
+      try {
+        await processReviewRequests(ledger, seenReviewRequests);
+        await persist();
+      } catch (e) {
+        console.error("processReviewRequests error:", e);
+      }
+    } else if (subdir === "review_responses") {
+      const r = await readJsonOrNull(fullPath, ReviewResponseSchema);
+      if (!r) return;
+      triggerWake(r.agent);
+    }
+  };
+
+  const handleChanged = async (subdir: string, file: string): Promise<void> => {
+    if (subdir === "tasks") {
+      const t = await readJsonOrNull(`${MARKET}/${subdir}/${file}`, TaskSchema);
+      if (t) scheduleDeadline(t);
+    }
+  };
+
+  const watchSubdir = async (subdir: string) => {
+    const dir = `${MARKET}/${subdir}`;
+    const initial = new Set((await readdir(dir).catch(() => [])).filter((f) => f.endsWith(".json")));
+    knownFiles.set(subdir, initial);
+
+    const w = watch(dir, async (eventType) => {
+      try {
+        const current = new Set((await readdir(dir).catch(() => [])).filter((f) => f.endsWith(".json")));
+        const known = knownFiles.get(subdir)!;
+        for (const f of current) {
+          if (!known.has(f)) {
+            known.add(f);
+            await handleAdded(subdir, f);
+          } else if (eventType === "change") {
+            await handleChanged(subdir, f);
+          }
+        }
+        for (const f of [...known]) {
+          if (!current.has(f)) known.delete(f);
+        }
+      } catch (e) {
+        console.error(`watch ${subdir} error:`, e);
+      }
+    });
+    w.on("error", (err) => console.error(`watch ${subdir}:`, err));
+  };
+
+  // Schedule deadlines for any existing open tasks
+  for (const f of await listJsonFiles(`${MARKET}/tasks`)) {
+    const t = await readJsonOrNull(`${MARKET}/tasks/${f}`, TaskSchema);
+    if (t) scheduleDeadline(t);
+  }
+
+  // Settle any already-expired auctions on startup, process pending reviews
+  await settleAndPersist();
+  await processReviewRequests(ledger, seenReviewRequests);
+  await persist();
+
+  // Attach watchers BEFORE initial wake so that bids placed during the
+  // initial wake fire handlers naturally (price-war wakeups).
+  for (const sub of ["tasks", "bids", "assignments", "review_requests", "review_responses"]) {
+    await watchSubdir(sub);
+  }
+  console.log("Watchers attached.");
+
+  // Initial wake of all alive agents
+  console.log("Initial wakeup...");
+  const initialAgents = aliveAgents(ledger).filter((n) => agentNames.includes(n));
+  await Promise.allSettled(initialAgents.map((a) => triggerWake(a)));
+  console.log("Initial wakeup complete. Idling for events.");
+
+  // Periodic reconciler — safety net for missed file events
+  setInterval(async () => {
+    try {
+      for (const f of await listJsonFiles(`${MARKET}/tasks`)) {
+        const t = await readJsonOrNull(`${MARKET}/tasks/${f}`, TaskSchema);
+        if (t && t.status === "open" && !deadlineTimers.has(t.id)) {
+          scheduleDeadline(t);
+        }
+      }
+      await settleAndPersist();
       await processReviewRequests(ledger, seenReviewRequests);
-      await saveLedger(ledger);
-      await syncBalances(ledger);
-      for (const agent of agentNames) {
-        const bal = ledger[agent]?.balance ?? 0;
-        if (bal <= 0) await recordEvent(agent, new Date(), "BANKRUPT — balance hit 0");
-      }
+      await persist();
+      await checkBankrupt();
+    } catch (e) {
+      console.error("reconcile error:", e);
     }
-  };
+  }, RECONCILE_MS);
 
-  const wakeLoop = async () => {
-    while (true) {
-      await Bun.sleep(TICK_MS);
-      const next = await snapshotMarket();
-      const changes = diffSnapshots(snapshot, next);
-      snapshot = next;
-      if (changes.added.length === 0 && changes.changed.length === 0) continue;
-
-      const alive = aliveAgents(ledger).filter((n) => agentNames.includes(n));
-      const wakers = await agentsToWake(alive, changes);
-      if (wakers.size > 0) {
-        console.log(`Changes detected (${changes.added.length} added, ${changes.changed.length} changed) — waking ${[...wakers].join(", ")}`);
-      }
-
-      const now = Date.now();
-      const toWake = [...wakers].filter((a) => {
-        const last = lastWoken.get(a) ?? 0;
-        return now - last >= MIN_WAKE_INTERVAL_MS;
-      });
-
-      await Promise.allSettled(
-        toWake.map(async (a) => {
-          await wakeAgent(a, ledger);
-          lastWoken.set(a, Date.now());
-        })
-      );
-
-      await saveLedger(ledger);
-      await syncBalances(ledger);
-      snapshot = await snapshotMarket();
-    }
-  };
-
-  await Promise.all([settleLoop(), wakeLoop()]);
+  // Block forever — handlers do all the work
+  await new Promise(() => {});
 }
 
 main().catch((e) => {
