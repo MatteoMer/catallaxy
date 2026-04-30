@@ -379,63 +379,59 @@ async function main() {
   await syncBalances(ledger);
   snapshot = await snapshotMarket();
 
-  // Main loop
-  while (true) {
-    await Bun.sleep(TICK_MS);
-
-    // 1. Settle expired auctions
-    const auctionResult = await resolveAuctions();
-    if (auctionResult.assigned + auctionResult.expired > 0) {
-      console.log(`Settled: ${auctionResult.assigned} assigned, ${auctionResult.expired} expired`);
-    }
-
-    // 2. Process new review requests (debits fee, runs claude -p, credits on LGTM)
-    await processReviewRequests(ledger, seenReviewRequests);
-
-    // 3. Detect changes
-    const next = await snapshotMarket();
-    const changes = diffSnapshots(snapshot, next);
-    snapshot = next;
-
-    if (changes.added.length === 0 && changes.changed.length === 0) {
-      continue;
-    }
-
-    // 4. Wake affected agents
-    const alive = aliveAgents(ledger).filter((n) => agentNames.includes(n));
-    const wakers = await agentsToWake(alive, changes);
-    if (wakers.size > 0) {
-      console.log(`Changes detected (${changes.added.length} added, ${changes.changed.length} changed) — waking ${[...wakers].join(", ")}`);
-    }
-
-    // Apply min wake interval to prevent runaway loops
-    const now = Date.now();
-    const toWake = [...wakers].filter((a) => {
-      const last = lastWoken.get(a) ?? 0;
-      return now - last >= MIN_WAKE_INTERVAL_MS;
-    });
-
-    // Wake them in parallel
-    await Promise.allSettled(
-      toWake.map(async (a) => {
-        await wakeAgent(a, ledger);
-        lastWoken.set(a, Date.now());
-      })
-    );
-
-    // 5. Save & sync
-    await saveLedger(ledger);
-    await syncBalances(ledger);
-    snapshot = await snapshotMarket(); // refresh after agents acted
-
-    // 6. Status
-    for (const agent of agentNames) {
-      const bal = ledger[agent]?.balance ?? 0;
-      if (bal <= 0) {
-        await recordEvent(agent, new Date(), "BANKRUPT — balance hit 0");
+  // Two concurrent loops so settlement and review processing keep ticking
+  // even when agent wakes are slow.
+  const settleLoop = async () => {
+    while (true) {
+      await Bun.sleep(TICK_MS);
+      const r = await resolveAuctions();
+      if (r.assigned + r.expired > 0) {
+        console.log(`Settled: ${r.assigned} assigned, ${r.expired} expired`);
+      }
+      await processReviewRequests(ledger, seenReviewRequests);
+      await saveLedger(ledger);
+      await syncBalances(ledger);
+      for (const agent of agentNames) {
+        const bal = ledger[agent]?.balance ?? 0;
+        if (bal <= 0) await recordEvent(agent, new Date(), "BANKRUPT — balance hit 0");
       }
     }
-  }
+  };
+
+  const wakeLoop = async () => {
+    while (true) {
+      await Bun.sleep(TICK_MS);
+      const next = await snapshotMarket();
+      const changes = diffSnapshots(snapshot, next);
+      snapshot = next;
+      if (changes.added.length === 0 && changes.changed.length === 0) continue;
+
+      const alive = aliveAgents(ledger).filter((n) => agentNames.includes(n));
+      const wakers = await agentsToWake(alive, changes);
+      if (wakers.size > 0) {
+        console.log(`Changes detected (${changes.added.length} added, ${changes.changed.length} changed) — waking ${[...wakers].join(", ")}`);
+      }
+
+      const now = Date.now();
+      const toWake = [...wakers].filter((a) => {
+        const last = lastWoken.get(a) ?? 0;
+        return now - last >= MIN_WAKE_INTERVAL_MS;
+      });
+
+      await Promise.allSettled(
+        toWake.map(async (a) => {
+          await wakeAgent(a, ledger);
+          lastWoken.set(a, Date.now());
+        })
+      );
+
+      await saveLedger(ledger);
+      await syncBalances(ledger);
+      snapshot = await snapshotMarket();
+    }
+  };
+
+  await Promise.all([settleLoop(), wakeLoop()]);
 }
 
 main().catch((e) => {
