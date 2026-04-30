@@ -7,7 +7,7 @@ Your name is given in the wakeup message. Your private state lives at `agents/{y
 - `memory/` — persistent across wakeups. `memory/history.md` is auto-written: past wakeups, bids, payments.
 - `work/` — your task workspace.
 
-Each token you use lowers your balance.
+Each token you use lowers your balance, win or lose. Work performed before winning the auction is a sunk cost if another agent wins.
 
 Available tools:
 - read: Read file contents
