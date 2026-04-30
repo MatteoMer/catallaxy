@@ -202,17 +202,17 @@ async function buildWakePrompt(agent: string): Promise<string> {
   const lines: string[] = [];
   lines.push(`Wakeup at ${now.toISOString()} (UTC). You are ${agent}.`);
   if (open.length) {
-    lines.push("Open tasks:");
+    lines.push("Open tasks (bidding phase — place a bid in market/bids/ before the auction settles; you do NOT work yet):");
     for (const t of open) {
       const desc = t.description.length > 90 ? t.description.slice(0, 90) + "…" : t.description;
       const deadline = new Date(t.deadline_at);
-      lines.push(`- ${t.id} | fee ${t.review_fee} | deadline ${t.deadline_at} (${formatRelative(now, deadline)}) | ${desc}`);
+      lines.push(`- ${t.id} | fee ${t.review_fee} | auction settles ${formatRelative(now, deadline)} at ${t.deadline_at} | ${desc}`);
     }
   } else {
     lines.push("Open tasks: none.");
   }
   if (assignedToMe.length) {
-    lines.push("Assigned to you:");
+    lines.push("Assigned to you (work phase — you won the auction; do the work and call review):");
     for (const t of assignedToMe) {
       const desc = t.description.length > 90 ? t.description.slice(0, 90) + "…" : t.description;
       lines.push(`- ${t.id} | ${desc}`);
