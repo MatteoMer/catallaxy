@@ -1,0 +1,13 @@
+{
+  "id": "task-002",
+  "description": "Add `count_words(s: str) -> int` to count_words.py at repo root. Returns the number of whitespace-separated words; empty/whitespace-only returns 0.",
+  "repo": "/Users/matteo/projects/catallaxy/repos/playground",
+  "base_branch": "main",
+  "review_fee": 1500,
+  "deterministic_checks": [],
+  "subjective_criteria": "Idiomatic Python; handles empty/whitespace-only/punctuation correctly.",
+  "status": "expired",
+  "posted_by": "operator",
+  "posted_at": "2026-04-30T14:44:21.574Z",
+  "deadline_at": "2026-04-30T14:49:21.574Z"
+}

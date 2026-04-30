@@ -17,7 +17,8 @@
  *   bun orchestrator/watch.ts
  */
 
-import { readdir, stat, stat as fsStat } from "node:fs/promises";
+import { readdir, stat, stat as fsStat, mkdir, rename, symlink, lstat, rm } from "node:fs/promises";
+import { existsSync } from "node:fs";
 import {
   loadLedger, saveLedger, initAgent, debit, syncBalances, aliveAgents,
   extractUsage, recordWakeup, recordEvent, type AgentUsage,
@@ -36,6 +37,51 @@ async function discoverAgents(): Promise<string[]> {
   return entries
     .filter((e) => e.isDirectory() && !e.name.startsWith("_"))
     .map((e) => e.name);
+}
+
+/**
+ * Ensure each agent has a sandbox at agents/{name}/sandbox/ with:
+ * - SYSTEM.md and market symlinked to the catallaxy root (read access).
+ * - memory/ and work/ dirs (writable).
+ * - identity.json (migrated from agents/{name}/ if it lived there in the old layout).
+ */
+async function ensureSandbox(agent: string): Promise<void> {
+  const agentDir = `${AGENTS_DIR}/${agent}`;
+  const sandboxDir = `${agentDir}/sandbox`;
+
+  await mkdir(sandboxDir, { recursive: true });
+  await mkdir(`${sandboxDir}/memory`, { recursive: true });
+  await mkdir(`${sandboxDir}/work`, { recursive: true });
+
+  const parentIdentity = `${agentDir}/identity.json`;
+  const sandboxIdentity = `${sandboxDir}/identity.json`;
+  if (existsSync(parentIdentity) && !existsSync(sandboxIdentity)) {
+    await rename(parentIdentity, sandboxIdentity);
+  }
+
+  // Clean up stale parent-level runtime files from the pre-sandbox layout.
+  for (const stale of ["balance.json", "memory", "work"]) {
+    const path = `${agentDir}/${stale}`;
+    if (existsSync(path)) await rm(path, { recursive: true, force: true });
+  }
+
+  const linkSysmd = `${sandboxDir}/SYSTEM.md`;
+  if (!(await existsLink(linkSysmd))) {
+    await symlink("../../../SYSTEM.md", linkSysmd);
+  }
+  const linkMarket = `${sandboxDir}/market`;
+  if (!(await existsLink(linkMarket))) {
+    await symlink("../../../market", linkMarket);
+  }
+}
+
+async function existsLink(path: string): Promise<boolean> {
+  try {
+    await lstat(path);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 async function readJsonOrNull<T>(path: string, schema: { parse: (d: unknown) => T }): Promise<T | null> {
@@ -202,7 +248,7 @@ async function buildWakePrompt(agent: string): Promise<string> {
   const lines: string[] = [];
   lines.push(`Wakeup at ${now.toISOString()} (UTC). You are ${agent}.`);
   if (open.length) {
-    lines.push("Open tasks (auction running):");
+    lines.push("Open auctions (status=open, accepting bids):");
     for (const t of open) {
       const desc = t.description.length > 90 ? t.description.slice(0, 90) + "…" : t.description;
       const deadline = new Date(t.deadline_at);
@@ -259,7 +305,7 @@ async function runAgent(agent: string): Promise<string> {
     "--api-key", process.env.OPENROUTER_API_KEY ?? "",
     "--mode", "json",
     "--no-session",
-  ], { cwd: process.cwd(), stdout: "pipe", stderr: "pipe" });
+  ], { cwd: `${process.cwd()}/${AGENTS_DIR}/${agent}/sandbox`, stdout: "pipe", stderr: "pipe" });
 
   const decoder = new TextDecoder();
   let buffer = "";
@@ -303,6 +349,8 @@ async function main() {
 
   const agentNames = await discoverAgents();
   console.log(`Agents: ${agentNames.join(", ")}`);
+
+  for (const a of agentNames) await ensureSandbox(a);
 
   const systemPrompt = await Bun.file(`${process.cwd()}/SYSTEM.md`)
     .text()

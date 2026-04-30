@@ -13,10 +13,13 @@ market/review_requests/
 market/review_responses/
 
 # Per-agent runtime state (template scaffolding tracked)
-agents/*/balance.json
-!agents/_template/balance.json
-agents/*/memory/
-agents/*/work/
+agents/*/sandbox/balance.json
+!agents/_template/sandbox/balance.json
+agents/*/sandbox/memory/
+agents/*/sandbox/work/
+# Sandbox symlinks regenerated at runtime
+agents/*/sandbox/SYSTEM.md
+agents/*/sandbox/market
 
 # Orchestrator state
 orchestrator/ledger.json

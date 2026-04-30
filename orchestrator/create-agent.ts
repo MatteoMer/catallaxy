@@ -21,7 +21,7 @@ const dest = `${AGENTS_DIR}/${name}`;
 // Copy template
 await cp(TEMPLATE_DIR, dest, { recursive: true });
 
-// Write identity
-await Bun.write(`${dest}/identity.json`, JSON.stringify({ name }, null, 2));
+// Write identity inside the sandbox
+await Bun.write(`${dest}/sandbox/identity.json`, JSON.stringify({ name }, null, 2));
 
 console.log(`Created agent "${name}" at ${dest}`);
