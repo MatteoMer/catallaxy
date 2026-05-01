@@ -49,10 +49,22 @@ async function resetMarket(): Promise<void> {
 }
 
 async function resetAgents(): Promise<void> {
+  // Wipe everything in each sandbox except identity.json and the symlinks
+  // (SYSTEM.md, market). This catches stray files agents wrote at sandbox
+  // root in addition to the standard memory/, work/, balance.json.
+  const keep = new Set(["identity.json", "SYSTEM.md", "market"]);
   for (const a of await listAgents()) {
-    await rmrf(`${AGENTS_DIR}/${a}/sandbox/memory`);
-    await rmrf(`${AGENTS_DIR}/${a}/sandbox/work`);
-    await rmrf(`${AGENTS_DIR}/${a}/sandbox/balance.json`);
+    const sandbox = `${AGENTS_DIR}/${a}/sandbox`;
+    let entries: string[];
+    try {
+      entries = await readdir(sandbox);
+    } catch {
+      continue;
+    }
+    for (const e of entries) {
+      if (keep.has(e)) continue;
+      await rmrf(`${sandbox}/${e}`);
+    }
   }
 }
 
