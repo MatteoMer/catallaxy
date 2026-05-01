@@ -1,0 +1,16 @@
+# Limit the build context to just what the image needs.
+# Everything below is excluded from the COPY context.
+
+agents/
+market/
+node_modules/
+.catallaxy/
+orchestrator/private/
+repos/
+dashboard/
+.git/
+.github/
+.vscode/
+.idea/
+
+# Keep extensions/, docker/, package.json and friends.

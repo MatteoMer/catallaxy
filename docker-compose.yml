@@ -1,0 +1,22 @@
+services:
+  watcher:
+    image: oven/bun:1.2-debian
+    working_dir: /workspace
+    command: bun orchestrator/watch.ts
+    network_mode: host
+    volumes:
+      - .:/workspace:rw
+      - /var/run/docker.sock:/var/run/docker.sock
+    environment:
+      - OPENROUTER_API_KEY
+      - AGENT_MODEL
+    depends_on:
+      - agent-network
+
+  agent-network:
+    image: docker:cli
+    command: >
+      sh -c "docker network inspect catallaxy-agents >/dev/null 2>&1
+             || docker network create --driver bridge catallaxy-agents"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
