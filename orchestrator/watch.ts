@@ -313,24 +313,31 @@ async function main() {
   /**
    * Coalescing wake trigger:
    * - At most one wake in flight per agent.
-   * - Multiple triggers during a wake collapse into a single follow-up.
+   * - `queueIfRunning` controls behavior when a wake is already in flight:
+   *     true  → set pending; fire a follow-up wake after current completes.
+   *             Use for actionable events (assignment, review_response) the
+   *             agent must react to.
+   *     false → drop the trigger. The running wake's tools can read live
+   *             market state, so it already covers refresh-style events
+   *             (new task, new bid). Avoids duplicate wakes for events the
+   *             current wake already handled.
    * - Respects MIN_WAKE_INTERVAL_MS between consecutive wakes.
    * - Never throws.
    */
-  const triggerWake = async (agent: string): Promise<void> => {
+  const triggerWake = async (agent: string, queueIfRunning: boolean = true): Promise<void> => {
     if (!agentNames.includes(agent)) return;
     if ((ledger[agent]?.balance ?? 0) <= 0) return;
 
     const status = wakeStatus.get(agent);
     if (status === "pending") return;
     if (status === "running") {
-      wakeStatus.set(agent, "pending");
+      if (queueIfRunning) wakeStatus.set(agent, "pending");
       return;
     }
 
     const wait = Math.max(0, MIN_WAKE_INTERVAL_MS - (Date.now() - (lastWoken.get(agent) ?? 0)));
     if (wait > 0) {
-      setTimeout(() => { triggerWake(agent); }, wait);
+      setTimeout(() => { triggerWake(agent, queueIfRunning); }, wait);
       return;
     }
 
@@ -345,7 +352,7 @@ async function main() {
     } finally {
       const wasPending = wakeStatus.get(agent) === "pending";
       wakeStatus.delete(agent);
-      if (wasPending) triggerWake(agent);
+      if (wasPending) triggerWake(agent, true);
     }
   };
 
@@ -387,17 +394,20 @@ async function main() {
       if (!t) return;
       console.log(`new task: ${t.id}`);
       scheduleDeadline(t);
-      for (const a of agentNames) triggerWake(a);
+      // Refresh-style: a running wake's tools will see the task too. No queue.
+      for (const a of agentNames) triggerWake(a, false);
     } else if (subdir === "bids") {
       const b = await readJsonOrNull(fullPath, BidSchema);
       if (!b) return;
+      // Refresh-style: a running wake can see the bid via tools. No queue.
       for (const a of agentNames) {
-        if (a !== b.agent) triggerWake(a);
+        if (a !== b.agent) triggerWake(a, false);
       }
     } else if (subdir === "assignments") {
       const a = await readJsonOrNull(fullPath, AssignmentSchema);
       if (!a) return;
-      triggerWake(a.winner);
+      // Actionable: winner needs to do the work. Queue if running.
+      triggerWake(a.winner, true);
     } else if (subdir === "review_requests") {
       try {
         await processReviewRequests(ledger, seenReviewRequests);
@@ -408,7 +418,8 @@ async function main() {
     } else if (subdir === "review_responses") {
       const r = await readJsonOrNull(fullPath, ReviewResponseSchema);
       if (!r) return;
-      triggerWake(r.agent);
+      // Actionable: agent must read the verdict. Queue if running.
+      triggerWake(r.agent, true);
     }
   };
 
