@@ -16,6 +16,7 @@ import {
   type ReviewRequest,
 } from "./schemas";
 import { debit, credit, recordEvent, summarizeWindow, type Ledger } from "./ledger";
+import { dim, red, brightRed, brightGreen, blue } from "./log";
 
 const MARKET = process.env.MARKET_DIR ?? "./market";
 
@@ -45,7 +46,7 @@ export async function processReviewRequests(ledger: Ledger, seen: Set<string>): 
       );
 
       if (task.status !== "assigned") {
-        console.log(`  review ${f}: task ${task.id} status=${task.status}, skipping`);
+        console.log(dim(`  review ${f}: task ${task.id} status=${task.status}, skipping`));
         continue;
       }
 
@@ -54,12 +55,12 @@ export async function processReviewRequests(ledger: Ledger, seen: Set<string>): 
       );
 
       if (assignment.winner !== req.agent) {
-        console.log(`  review ${f}: ${req.agent} not winner of ${req.task_id} (${assignment.winner})`);
+        console.log(dim(`  review ${f}: ${req.agent} not winner of ${req.task_id} (${assignment.winner})`));
         continue;
       }
 
       debit(ledger, req.agent, task.review_fee, `Review fee: ${req.task_id} #${req.seq}`);
-      console.log(`  review ${req.task_id} #${req.seq}: -${task.review_fee} from ${req.agent}`);
+      console.log(red(`  review ${req.task_id} #${req.seq}: -${task.review_fee} from ${req.agent}`));
 
       const result = await runReview(task, req);
 
@@ -83,7 +84,7 @@ export async function processReviewRequests(ledger: Ledger, seen: Set<string>): 
         // completed. Don't double-credit.
         const taskNow = await Bun.file(`${MARKET}/tasks/${req.task_id}.json`).json().catch(() => null);
         if (!taskNow || taskNow.status !== "assigned") {
-          console.log(`  ${req.task_id}: LGTM but task already ${taskNow?.status ?? "missing"}; not double-crediting`);
+          console.log(dim(`  ${req.task_id}: LGTM but task already ${taskNow?.status ?? "missing"}; not double-crediting`));
           continue;
         }
         credit(ledger, req.agent, assignment.payment, `Accepted: ${req.task_id}`);
@@ -92,7 +93,7 @@ export async function processReviewRequests(ledger: Ledger, seen: Set<string>): 
           `${MARKET}/tasks/${req.task_id}.json`,
           JSON.stringify(completed, null, 2)
         );
-        console.log(`  ${req.task_id}: LGTM → +${assignment.payment} to ${req.agent}`);
+        console.log(brightGreen(`  ${req.task_id}: LGTM → +${assignment.payment} to ${req.agent}`));
 
         const closeAt = new Date();
         // Cost window starts at task.posted_at so the wake that decided the
@@ -107,7 +108,7 @@ export async function processReviewRequests(ledger: Ledger, seen: Set<string>): 
           `task ${req.task_id} completed — paid ${s.received}, cost ${totalCost} (thinking ${s.thinking}, review fees ${s.reviewFees}), net ${s.net}`
         );
       } else {
-        console.log(`  ${req.task_id}: needs_work (#${req.seq})`);
+        console.log(brightRed(`  ${req.task_id}: needs_work (#${req.seq})`));
       }
 
       processed++;
@@ -126,7 +127,8 @@ async function runReview(
   const workDir = task.repo;
   const prompt = buildReviewPrompt(task, req);
   const tag = `reviewer/prompt for ${req.agent} task ${req.task_id} #${req.seq}`;
-  for (const line of prompt.split("\n")) console.log(`  [${tag}] ${line}`);
+  const coloredTag = blue(`[${tag}]`);
+  for (const line of prompt.split("\n")) console.log(`  ${coloredTag} ${line}`);
 
   const env = { ...process.env };
   delete env.ANTHROPIC_API_KEY;

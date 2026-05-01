@@ -24,6 +24,7 @@ import {
 import { resolveAuctions } from "./exchange";
 import { processReviewRequests } from "./reviewer";
 import { TaskSchema, BidSchema, AssignmentSchema, ReviewRequestSchema, ReviewResponseSchema } from "./schemas";
+import { dim, gray, cyan, magenta, brightMagenta, yellow, brightYellow, red, brightRed, green, brightGreen, bold, blue } from "./log";
 
 const AGENTS_DIR = process.env.AGENTS_DIR ?? "./agents";
 const MARKET = process.env.MARKET_DIR ?? "./market";
@@ -187,8 +188,9 @@ async function buildWakePrompt(agent: string): Promise<string> {
   return lines.join("\n");
 }
 
-function logPrefixed(prefix: string, content: string): void {
-  for (const line of content.split("\n")) console.log(`  [${prefix}] ${line}`);
+function logPrefixed(prefix: string, content: string, color: (s: string) => string = (s) => s): void {
+  const tag = color(`[${prefix}]`);
+  for (const line of content.split("\n")) console.log(`  ${tag} ${line}`);
 }
 
 function handlePiEvent(agent: string, line: string): void {
@@ -203,18 +205,18 @@ function handlePiEvent(agent: string, line: string): void {
   if (ev.type !== "turn_end" || !ev.message?.content) return;
   for (const c of ev.message.content) {
     if (c.type === "thinking" && c.thinking) {
-      logPrefixed(`${agent}/thinks`, c.thinking);
+      logPrefixed(`${agent}/thinks`, c.thinking, gray);
     } else if (c.type === "text" && c.text) {
-      logPrefixed(`${agent}/says`, c.text);
+      logPrefixed(`${agent}/says`, c.text, cyan);
     } else if (c.type === "tool_use") {
-      logPrefixed(`${agent}/${c.name}`, JSON.stringify(c.input ?? {}));
+      logPrefixed(`${agent}/${c.name}`, JSON.stringify(c.input ?? {}), green);
     }
   }
 }
 
 async function runAgent(agent: string): Promise<string> {
   const prompt = await buildWakePrompt(agent);
-  logPrefixed(`${agent}/wake-prompt`, prompt);
+  logPrefixed(`${agent}/wake-prompt`, prompt, magenta);
 
   const model = process.env.AGENT_MODEL ?? "openrouter/z-ai/glm-5.1";
 
@@ -249,36 +251,36 @@ async function runAgent(agent: string): Promise<string> {
   const stderr = await new Response(proc.stderr).text();
   const exitCode = await proc.exited;
   if (exitCode !== 0) {
-    console.error(`  [${agent}] exit ${exitCode}: ${stderr.slice(0, 200)}`);
+    console.error(red(`  [${agent}] exit ${exitCode}: ${stderr.slice(0, 200)}`));
   }
   return captured;
 }
 
 async function wakeAgent(agent: string, ledger: Ledger): Promise<void> {
   const at = new Date();
-  console.log(`  → waking ${agent} at ${at.toISOString().slice(11, 19)}`);
+  console.log(brightMagenta(`  → waking ${agent} at ${at.toISOString().slice(11, 19)}`));
   const output = await runAgent(agent);
   const usage = extractUsage(output);
   if (usage.totalTokens > 0) {
     debit(ledger, agent, usage.totalTokens, `Wakeup: ${usage.totalTokens}tok ($${usage.costUsd.toFixed(4)})`, at);
-    console.log(`    ${agent}: -${usage.totalTokens.toLocaleString()} tokens ($${usage.costUsd.toFixed(4)})`);
+    console.log(dim(`    ${agent}: -${usage.totalTokens.toLocaleString()} tokens ($${usage.costUsd.toFixed(4)})`));
   }
   const ctx = await gatherWakeupContext(agent, at);
   await recordWakeup(agent, at, usage, ctx);
 }
 
 async function main() {
-  console.log(`Catallaxy watcher: event-driven (min wake interval ${MIN_WAKE_INTERVAL_MS}ms, reconcile every ${RECONCILE_MS}ms)`);
+  console.log(bold(`Catallaxy watcher: event-driven (min wake interval ${MIN_WAKE_INTERVAL_MS}ms, reconcile every ${RECONCILE_MS}ms)`));
 
   const agentNames = await discoverAgents();
-  console.log(`Agents: ${agentNames.join(", ")}`);
+  console.log(cyan(`Agents: ${agentNames.join(", ")}`));
 
   for (const a of agentNames) await ensureSandbox(a);
 
   const systemPrompt = await Bun.file(`${process.cwd()}/SYSTEM.md`)
     .text()
     .catch(() => "(no SYSTEM.md found)");
-  logPrefixed("orchestrator/system-prompt", systemPrompt);
+  logPrefixed("orchestrator/system-prompt", systemPrompt, dim);
 
   const ledger = await loadLedger();
   for (const name of agentNames) initAgent(ledger, name);
@@ -372,7 +374,7 @@ async function main() {
     try {
       const r = await resolveAuctions();
       if (r.assigned + r.expired > 0) {
-        console.log(`Settled: ${r.assigned} assigned, ${r.expired} expired`);
+        console.log(brightYellow(`Settled: ${r.assigned} assigned, ${r.expired} expired`));
       }
     } catch (e) {
       console.error("resolveAuctions error:", e);
@@ -393,7 +395,7 @@ async function main() {
       await settleAndPersist();
     }, ms);
     deadlineTimers.set(task.id, t);
-    console.log(`scheduled settle for ${task.id} ${formatRelative(new Date(), new Date(task.deadline_at))}`);
+    console.log(dim(`scheduled settle for ${task.id} ${formatRelative(new Date(), new Date(task.deadline_at))}`));
   };
 
   // Watcher infrastructure
@@ -404,7 +406,7 @@ async function main() {
     if (subdir === "tasks") {
       const t = await readJsonOrNull(fullPath, TaskSchema);
       if (!t) return;
-      console.log(`new task: ${t.id}`);
+      console.log(yellow(`new task: ${t.id}`));
       scheduleDeadline(t);
       for (const a of agentNames) triggerWake(a, false);
     } else if (subdir === "bids") {
@@ -424,7 +426,9 @@ async function main() {
     } else if (subdir === "review_responses") {
       const r = await readJsonOrNull(fullPath, ReviewResponseSchema);
       if (!r) return;
-      triggerWake(r.agent, true);
+      // Only wake on needs_work — LGTM closes the task and there's nothing
+      // for the agent to react to. Saves an unnecessary wake's tokens.
+      if (r.verdict === "needs_work") triggerWake(r.agent, true);
     }
   };
 
@@ -476,7 +480,7 @@ async function main() {
   for (const sub of ["tasks", "bids", "assignments", "review_requests", "review_responses"]) {
     await watchSubdir(sub);
   }
-  console.log("Watchers attached.");
+  console.log(green("Watchers attached."));
 
   // Replay existing actionable state as events (no unconditional wake).
   // - Open auctions wake all agents (refresh; running wake's tools cover it).
@@ -497,7 +501,7 @@ async function main() {
     const t = await readJsonOrNull(`${MARKET}/tasks/${ass.task_id}.json`, TaskSchema);
     if (t && t.status === "assigned") triggerWake(ass.winner, true);
   }
-  console.log("Idling for events.");
+  console.log(dim("Idling for events."));
 
   // Periodic reconciler — safety net for missed file events
   setInterval(async () => {

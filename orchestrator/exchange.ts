@@ -8,6 +8,7 @@
 import { readdir } from "node:fs/promises";
 import { TaskSchema, BidSchema, type Task } from "./schemas";
 import { recordEvent } from "./ledger";
+import { dim, red, brightGreen, brightYellow } from "./log";
 
 const MARKET = process.env.MARKET_DIR ?? "./market";
 const RESERVATIONS_PATH = process.env.RESERVATIONS_PATH ?? "./orchestrator/private/reservations.json";
@@ -62,7 +63,7 @@ export async function resolveAuctions(now: Date = new Date()): Promise<{ assigne
 
     const reservation = reservations[task.id];
     if (reservation === undefined) {
-      console.warn(`  ${task.id}: no reservation price set, skipping`);
+      console.warn(dim(`  ${task.id}: no reservation price set, skipping`));
       continue;
     }
 
@@ -78,7 +79,7 @@ export async function resolveAuctions(now: Date = new Date()): Promise<{ assigne
         JSON.stringify(updatedTask, null, 2)
       );
       console.log(
-        `  ${task.id}: EXPIRED — ${taskBids.length} bid(s), none ≤ reservation ${reservation}`
+        red(`  ${task.id}: EXPIRED — ${taskBids.length} bid(s), none ≤ reservation ${reservation}`)
       );
       for (const b of taskBids) {
         await recordEvent(b.agent, now, `task ${task.id} expired — your bid ${b.price} above reservation, no payment`);
@@ -109,7 +110,7 @@ export async function resolveAuctions(now: Date = new Date()): Promise<{ assigne
     );
 
     console.log(
-      `  ${task.id}: ${winner.agent} wins (paid ${payment}, reserve ${reservation}, ${validBids.length} valid bid(s))`
+      brightGreen(`  ${task.id}: ${winner.agent} wins (paid ${payment}, reserve ${reservation}, ${validBids.length} valid bid(s))`)
     );
 
     await recordEvent(winner.agent, now, `won task ${task.id} at ${payment} (${validBids.length} valid bids)`);
@@ -126,5 +127,5 @@ export async function resolveAuctions(now: Date = new Date()): Promise<{ assigne
 // Run standalone (settles whatever is past deadline now)
 if (import.meta.main) {
   const result = await resolveAuctions();
-  console.log(`Exchange: ${result.assigned} assigned, ${result.expired} expired`);
+  console.log(brightYellow(`Exchange: ${result.assigned} assigned, ${result.expired} expired`));
 }
