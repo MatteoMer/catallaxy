@@ -1,0 +1,18 @@
+{
+  "id": "task-007",
+  "description": "Create a TypeScript module 'groupAnagrams.ts' at the repo root exporting a 'groupAnagrams(words: string[]): string[][]' function. It groups input strings such that each inner array contains all anagrams of one another. Comparison is case-sensitive and treats the empty string as its own group. The input array must not be mutated. Tests in tests/groupAnagrams.test.ts must pass.",
+  "repo": "/Users/matteo/projects/catallaxy/repos/playground",
+  "base_branch": "main",
+  "review_fee": 2000,
+  "deterministic_checks": [
+    {
+      "type": "command",
+      "cmd": "bun test tests/groupAnagrams.test.ts",
+      "must_pass": true
+    }
+  ],
+  "status": "completed",
+  "posted_by": "operator",
+  "posted_at": "2026-05-01T21:29:20.637Z",
+  "deadline_at": "2026-05-01T21:31:20.637Z"
+}

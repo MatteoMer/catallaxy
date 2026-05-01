@@ -1,0 +1,18 @@
+{
+  "id": "task-008",
+  "description": "Create a TypeScript module 'parseDuration.ts' at the repo root exporting a 'parseDuration(input: string): number' function. It parses human duration strings like '500ms', '45s', '30m', '2h', '7d', and compounds like '1h30m' or '1m30s500ms', returning the equivalent number of milliseconds. Surrounding whitespace is ignored. Returns NaN for invalid input including: empty string, missing unit, unknown unit, negative components, fractional components, and the same unit repeated in one expression. Tests in tests/parseDuration.test.ts must pass.",
+  "repo": "/Users/matteo/projects/catallaxy/repos/playground",
+  "base_branch": "main",
+  "review_fee": 2000,
+  "deterministic_checks": [
+    {
+      "type": "command",
+      "cmd": "bun test tests/parseDuration.test.ts",
+      "must_pass": true
+    }
+  ],
+  "status": "completed",
+  "posted_by": "operator",
+  "posted_at": "2026-05-01T21:33:44.857Z",
+  "deadline_at": "2026-05-01T21:35:44.857Z"
+}

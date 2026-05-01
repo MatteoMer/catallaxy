@@ -5,10 +5,17 @@
  * The orchestrator reads/writes the full ledger.
  */
 
+import { mkdir, readdir, unlink } from "node:fs/promises";
 import { LedgerSchema, BalanceSchema, type Ledger, type Balance } from "./schemas";
 
 const AGENTS_DIR = process.env.AGENTS_DIR ?? "./agents";
 const LEDGER_PATH = process.env.LEDGER_PATH ?? "./orchestrator/ledger.json";
+const MARKET = process.env.MARKET_DIR ?? "./market";
+const PENDING_SUMMARIES_DIR = `${MARKET}/pending_summaries`;
+// History lives outside the agent's sandbox so the agent's pi process
+// has no filesystem path to write it. Agents read history via the
+// `history` tool exposed by extensions/catallaxy.ts.
+const HISTORY_DIR = process.env.AGENT_HISTORY_DIR ?? "./orchestrator/private/history";
 
 export async function loadLedger(): Promise<Ledger> {
   try {
@@ -132,7 +139,7 @@ export async function recordWakeup(
     reviewsCalled: { task_id: string; seq: number }[];
   }
 ): Promise<void> {
-  const path = `${AGENTS_DIR}/${agent}/sandbox/memory/history.md`;
+  const path = `${HISTORY_DIR}/${agent}.md`;
   const lines: string[] = [];
 
   const timestamp = at.toISOString().replace("T", " ").slice(0, 19);
@@ -176,12 +183,71 @@ export function summarizeWindow(
 }
 
 export async function recordEvent(agent: string, at: Date, message: string): Promise<void> {
-  const path = `${AGENTS_DIR}/${agent}/sandbox/memory/history.md`;
+  const path = `${HISTORY_DIR}/${agent}.md`;
   const timestamp = at.toISOString().replace("T", " ").slice(0, 19);
   await appendToFile(path, `### ${timestamp} — ${message}\n\n`);
 }
 
+interface PendingSummary {
+  task_id: string;
+  agent: string;
+  from_time: string;
+  completed_at: string;
+}
+
+/**
+ * Write a marker that a task's per-task cost summary should be flushed once
+ * the agent's currently-in-flight wake has completed and its debit has
+ * posted. Computing the summary at LGTM time is wrong: the wake that called
+ * `request_review` is often still running, so its debit isn't in the ledger
+ * yet and the summary undercounts cost.
+ */
+export async function writePendingSummary(p: PendingSummary): Promise<void> {
+  await mkdir(PENDING_SUMMARIES_DIR, { recursive: true });
+  await Bun.write(`${PENDING_SUMMARIES_DIR}/${p.task_id}.json`, JSON.stringify(p, null, 2));
+}
+
+/**
+ * Flush any pending per-task summaries for `agent`. Caller must guarantee
+ * no wake for `agent` is currently in flight (otherwise an unrelated wake's
+ * debit could be attributed to the completed task). `toTime` is the upper
+ * bound of the cost window — typically "now" at the moment of the call.
+ */
+export async function flushPendingSummaries(
+  ledger: Ledger,
+  agent: string,
+  toTime: Date
+): Promise<void> {
+  let files: string[];
+  try {
+    files = await readdir(PENDING_SUMMARIES_DIR);
+  } catch {
+    return;
+  }
+  for (const f of files) {
+    if (!f.endsWith(".json")) continue;
+    const path = `${PENDING_SUMMARIES_DIR}/${f}`;
+    let p: PendingSummary;
+    try {
+      p = await Bun.file(path).json();
+    } catch {
+      continue;
+    }
+    if (p.agent !== agent) continue;
+    const s = summarizeWindow(ledger, agent, new Date(p.from_time), toTime);
+    const totalCost = s.thinking + s.reviewFees;
+    await recordEvent(
+      agent,
+      toTime,
+      `task ${p.task_id} completed — paid ${s.received}, cost ${totalCost} (thinking ${s.thinking}, review fees ${s.reviewFees}), net ${s.net}`
+    );
+    await unlink(path).catch(() => {});
+  }
+}
+
 async function appendToFile(path: string, content: string): Promise<void> {
+  const slash = path.lastIndexOf("/");
+  if (slash > 0) await mkdir(path.slice(0, slash), { recursive: true });
   const existing = await Bun.file(path).text().catch(() => "");
   await Bun.write(path, existing + content);
 }

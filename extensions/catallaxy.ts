@@ -13,36 +13,114 @@
  *   - my_assignments  list tasks you've won and not yet completed
  *   - task_verdicts   show review verdicts you've received for a task
  *   - my_balance      show your current token balance
+ *   - history         read your append-only history log (orchestrator-written)
  *
- * The agent's CWD is its sandbox (agents/{name}/sandbox/), where
- * identity.json and balance.json live. Market state lives at
- * <catallaxy_root>/market/, resolved via this file's directory.
+ * All tools talk to the orchestrator over a Unix-domain socket — they
+ * have no direct filesystem access to market state. Identity is
+ * implicit (which socket the connection arrived on), so the
+ * orchestrator does not trust any agent name in the request payload.
  */
 
 import { Type } from "@mariozechner/pi-ai";
 import { defineTool, type ExtensionAPI } from "@mariozechner/pi-coding-agent";
-import { mkdir, readFile, readdir, writeFile } from "node:fs/promises";
-import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { connect } from "node:net";
 
-const baseDir = dirname(fileURLToPath(import.meta.url));
-const CATALLAXY_ROOT = join(baseDir, "..");
-const MARKET = join(CATALLAXY_ROOT, "market");
-
-async function readJson<T = any>(path: string): Promise<T> {
-  const text = await readFile(path, "utf-8");
-  return JSON.parse(text) as T;
+/**
+ * Resolve the orchestrator's RPC endpoint and auth token.
+ *
+ * The watcher passes both via -e at spawn time:
+ *   CATALLAXY_RPC_ADDR=host:port    (the gateway in container mode)
+ *   CATALLAXY_AUTH_TOKEN=<secret>   (per-agent shared secret)
+ *
+ * Identity is fixed by the token, not by the address — the
+ * orchestrator's RPC server looks up the token to determine which
+ * agent the caller is.
+ */
+function findRpcConfig(): { host: string; port: number; token: string } {
+  const addr = process.env.CATALLAXY_RPC_ADDR;
+  const token = process.env.CATALLAXY_AUTH_TOKEN;
+  if (!addr) {
+    throw new Error(
+      "catallaxy extension: CATALLAXY_RPC_ADDR not set. The orchestrator should pass it via -e."
+    );
+  }
+  if (!token) {
+    throw new Error(
+      "catallaxy extension: CATALLAXY_AUTH_TOKEN not set. The orchestrator should pass it via -e."
+    );
+  }
+  const [host, portStr] = addr.split(":");
+  const port = parseInt(portStr ?? "", 10);
+  if (!host || !Number.isFinite(port)) {
+    throw new Error(`catallaxy extension: malformed CATALLAXY_RPC_ADDR '${addr}'`);
+  }
+  return { host, port, token };
 }
 
-async function writeJson(path: string, data: any): Promise<void> {
-  await mkdir(dirname(path), { recursive: true });
-  await writeFile(path, JSON.stringify(data, null, 2));
+interface RpcOk { id: number; result: any }
+interface RpcErr { id: number; error: { code: number; message: string } }
+type RpcResp = RpcOk | RpcErr;
+
+/**
+ * One TCP connection per RPC call.
+ *
+ * The naive design — one persistent socket reused across the
+ * extension's lifetime — would keep pi's event loop alive after it
+ * emits agent_end, so the container never exits. Calling `unref()`
+ * on the socket fixes the hang but lets the loop exit mid-call when
+ * the one-and-only HTTP-to-the-model request resolves: the next
+ * tool call then races with shutdown and silently drops. Per-call
+ * sockets sidestep both: each call is an active ref while in-flight
+ * and the socket closes naturally on response, so when pi has no
+ * outstanding work the loop drains and the process exits.
+ *
+ * Cost: ~one TCP handshake per tool call (sub-ms within the docker
+ * bridge). Pi makes ~5–15 tool calls per wake; the overhead is
+ * dwarfed by the model latency.
+ */
+class RpcClient {
+  private nextId = 1;
+  private cfg: { host: string; port: number; token: string };
+
+  constructor(cfg: { host: string; port: number; token: string }) {
+    this.cfg = cfg;
+  }
+
+  async call(method: string, params: Record<string, unknown> = {}): Promise<any> {
+    const id = this.nextId++;
+    return new Promise((resolve, reject) => {
+      const s = connect({ host: this.cfg.host, port: this.cfg.port });
+      let buf = "";
+      let settled = false;
+      const finish = (fn: () => void) => {
+        if (settled) return;
+        settled = true;
+        try { s.end(); } catch {}
+        fn();
+      };
+      s.on("connect", () => {
+        s.write(JSON.stringify({ id, method, params, auth: this.cfg.token }) + "\n");
+      });
+      s.on("data", (chunk: Buffer) => {
+        buf += chunk.toString("utf-8");
+        const idx = buf.indexOf("\n");
+        if (idx < 0) return;
+        let msg: RpcResp;
+        try { msg = JSON.parse(buf.slice(0, idx)); }
+        catch (e) { finish(() => reject(e instanceof Error ? e : new Error(String(e)))); return; }
+        if ("error" in msg) finish(() => reject(new Error(msg.error.message)));
+        else finish(() => resolve(msg.result));
+      });
+      s.on("error", (err: Error) => finish(() => reject(err)));
+      s.on("close", () => finish(() => reject(new Error("rpc connection closed before response"))));
+    });
+  }
 }
 
-async function readIdentity(): Promise<string> {
-  const id = await readJson<{ name?: string }>("identity.json");
-  if (!id?.name) throw new Error("identity.json missing 'name' field");
-  return id.name;
+let _client: RpcClient | null = null;
+function rpc(): RpcClient {
+  if (!_client) _client = new RpcClient(findRpcConfig());
+  return _client;
 }
 
 function fmtRel(ms: number): string {
@@ -59,24 +137,18 @@ const listTasksTool = defineTool({
   description: "List currently open catallaxy auctions you can bid on. Returns id, time-to-deadline, review_fee, and description.",
   parameters: Type.Object({}),
   async execute() {
-    const files = await readdir(`${MARKET}/tasks`).catch(() => [] as string[]);
-    const tasks: any[] = [];
-    for (const f of files) {
-      if (!f.endsWith(".json")) continue;
-      try { tasks.push(await readJson(`${MARKET}/tasks/${f}`)); } catch {}
-    }
-    const open = tasks.filter((t) => t?.status === "open");
-    if (open.length === 0) {
+    const { tasks } = await rpc().call("list_tasks");
+    if (!tasks.length) {
       return { content: [{ type: "text", text: "No open auctions." }], details: { count: 0 } };
     }
     const now = Date.now();
     const lines = ["Open auctions:"];
-    for (const t of open) {
+    for (const t of tasks) {
       const ms = new Date(t.deadline_at).getTime() - now;
       const tl = ms < 0 ? `expired ${fmtRel(ms)} ago` : `settles in ${fmtRel(ms)}`;
       lines.push(`- ${t.id} | ${tl} | review_fee ${t.review_fee} | ${t.description}`);
     }
-    return { content: [{ type: "text", text: lines.join("\n") }], details: { count: open.length } };
+    return { content: [{ type: "text", text: lines.join("\n") }], details: { count: tasks.length } };
   },
 });
 
@@ -88,12 +160,11 @@ const taskInfoTool = defineTool({
     task_id: Type.String({ description: "The task ID, e.g. 'task-001'" }),
   }),
   async execute(_id, params) {
-    try {
-      const t = await readJson(`${MARKET}/tasks/${params.task_id}.json`);
-      return { content: [{ type: "text", text: JSON.stringify(t, null, 2) }], details: t };
-    } catch {
+    const { task } = await rpc().call("task_info", { task_id: params.task_id });
+    if (!task) {
       return { content: [{ type: "text", text: `task '${params.task_id}' not found` }], details: { error: "not_found" }, isError: true };
     }
+    return { content: [{ type: "text", text: JSON.stringify(task, null, 2) }], details: task };
   },
 });
 
@@ -106,16 +177,9 @@ const placeBidTool = defineTool({
     price: Type.Integer({ minimum: 1, description: "Bid price in tokens (positive integer)" }),
   }),
   async execute(_id, params) {
-    const agent = await readIdentity();
-    const bid = {
-      task_id: params.task_id,
-      agent,
-      price: params.price,
-      created_at: new Date().toISOString(),
-    };
-    await writeJson(`${MARKET}/bids/${params.task_id}-${agent}.json`, bid);
+    const { bid } = await rpc().call("place_bid", { task_id: params.task_id, price: params.price });
     return {
-      content: [{ type: "text", text: `bid placed: ${params.task_id} @ ${params.price} by ${agent}` }],
+      content: [{ type: "text", text: `bid placed: ${bid.task_id} @ ${bid.price} by ${bid.agent}` }],
       details: bid,
     };
   },
@@ -130,24 +194,10 @@ const requestReviewTool = defineTool({
     branch: Type.String({ description: "Git branch in your work tree, e.g. 'fix/palindrome'" }),
   }),
   async execute(_id, params) {
-    const agent = await readIdentity();
-    let existing: string[] = [];
-    try { existing = await readdir(`${MARKET}/review_requests`); } catch {}
-    const matching = existing.filter(
-      (f) => f.startsWith(`${params.task_id}-${agent}-`) && f.endsWith(".json")
-    );
-    const seq = matching.length + 1;
-    const req = {
-      task_id: params.task_id,
-      agent,
-      branch: params.branch,
-      seq,
-      requested_at: new Date().toISOString(),
-    };
-    await writeJson(`${MARKET}/review_requests/${params.task_id}-${agent}-${seq}.json`, req);
+    const { request } = await rpc().call("request_review", { task_id: params.task_id, branch: params.branch });
     return {
-      content: [{ type: "text", text: `review requested: ${params.task_id} #${seq} branch=${params.branch}` }],
-      details: req,
+      content: [{ type: "text", text: `review requested: ${request.task_id} #${request.seq} branch=${request.branch}` }],
+      details: request,
     };
   },
 });
@@ -158,26 +208,15 @@ const myAssignmentsTool = defineTool({
   description: "List tasks you've been assigned (won the auction). Use this after the auction settles to know what to work on.",
   parameters: Type.Object({}),
   async execute() {
-    const agent = await readIdentity();
-    const files = await readdir(`${MARKET}/assignments`).catch(() => [] as string[]);
-    const mine: any[] = [];
-    for (const f of files) {
-      if (!f.endsWith(".json")) continue;
-      try {
-        const a = await readJson<any>(`${MARKET}/assignments/${f}`);
-        if (a?.winner !== agent) continue;
-        const t = await readJson<any>(`${MARKET}/tasks/${a.task_id}.json`).catch(() => null);
-        mine.push({ ...a, task_status: t?.status, description: t?.description });
-      } catch {}
-    }
-    if (mine.length === 0) {
+    const { assignments } = await rpc().call("my_assignments");
+    if (!assignments.length) {
       return { content: [{ type: "text", text: "No assignments." }], details: { count: 0 } };
     }
     const lines = ["Your assignments:"];
-    for (const a of mine) {
+    for (const a of assignments) {
       lines.push(`- ${a.task_id} (${a.task_status ?? "?"}) — paid ${a.payment} on LGTM | ${a.description ?? ""}`);
     }
-    return { content: [{ type: "text", text: lines.join("\n") }], details: { count: mine.length } };
+    return { content: [{ type: "text", text: lines.join("\n") }], details: { count: assignments.length } };
   },
 });
 
@@ -189,18 +228,8 @@ const taskVerdictsTool = defineTool({
     task_id: Type.String({ description: "The task ID, e.g. 'task-001'" }),
   }),
   async execute(_id, params) {
-    const agent = await readIdentity();
-    const files = await readdir(`${MARKET}/review_responses`).catch(() => [] as string[]);
-    const verdicts: any[] = [];
-    for (const f of files) {
-      if (!f.endsWith(".json")) continue;
-      try {
-        const r = await readJson<any>(`${MARKET}/review_responses/${f}`);
-        if (r?.task_id === params.task_id && r?.agent === agent) verdicts.push(r);
-      } catch {}
-    }
-    verdicts.sort((a, b) => (a.seq ?? 0) - (b.seq ?? 0));
-    if (verdicts.length === 0) {
+    const { verdicts } = await rpc().call("task_verdicts", { task_id: params.task_id });
+    if (!verdicts.length) {
       return { content: [{ type: "text", text: `No verdicts for ${params.task_id}.` }], details: { count: 0 } };
     }
     const lines: string[] = [];
@@ -213,18 +242,29 @@ const taskVerdictsTool = defineTool({
   },
 });
 
+const historyTool = defineTool({
+  name: "history",
+  label: "Read history",
+  description: "Read your full append-only history log. The orchestrator writes wake costs (in/out/cache token counts), bids placed, won/lost auctions, review calls, and per-task `paid X cost Y net Z` summaries. You CAN'T write to it — call this tool whenever you need to consult past costs to size a bid.",
+  parameters: Type.Object({}),
+  async execute() {
+    const { text } = await rpc().call("history");
+    if (!text) return { content: [{ type: "text", text: "(history empty)" }], details: { length: 0 } };
+    return { content: [{ type: "text", text }], details: { length: text.length } };
+  },
+});
+
 const myBalanceTool = defineTool({
   name: "my_balance",
   label: "Token balance",
   description: "Show your current token balance.",
   parameters: Type.Object({}),
   async execute() {
-    try {
-      const b = await readJson<{ balance?: number }>("balance.json");
-      return { content: [{ type: "text", text: `balance: ${b.balance ?? 0} tokens` }], details: b };
-    } catch {
-      return { content: [{ type: "text", text: "balance.json not found" }], details: { error: "not_found" }, isError: true };
+    const { balance } = await rpc().call("my_balance");
+    if (balance == null) {
+      return { content: [{ type: "text", text: "balance unknown" }], details: { error: "not_found" }, isError: true };
     }
+    return { content: [{ type: "text", text: `balance: ${balance} tokens` }], details: { balance } };
   },
 });
 
@@ -236,4 +276,5 @@ export default function (pi: ExtensionAPI) {
   pi.registerTool(myAssignmentsTool);
   pi.registerTool(taskVerdictsTool);
   pi.registerTool(myBalanceTool);
+  pi.registerTool(historyTool);
 }

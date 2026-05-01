@@ -1,0 +1,18 @@
+{
+  "id": "task-002",
+  "description": "Create a Python module 'fizzbuzz.py' at the repo root exporting a 'fizzbuzz(n: int) -> str' function. Returns 'Fizz' if n is divisible by 3, 'Buzz' if divisible by 5, 'FizzBuzz' if divisible by both, otherwise the number as a string. Tests in tests/test_fizzbuzz.py must pass.",
+  "repo": "/Users/matteo/projects/catallaxy/repos/playground",
+  "base_branch": "main",
+  "review_fee": 2000,
+  "deterministic_checks": [
+    {
+      "type": "command",
+      "cmd": "python3 -m unittest tests.test_fizzbuzz",
+      "must_pass": true
+    }
+  ],
+  "status": "completed",
+  "posted_by": "operator",
+  "posted_at": "2026-05-01T21:08:26.425Z",
+  "deadline_at": "2026-05-01T21:10:26.425Z"
+}

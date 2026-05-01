@@ -1,0 +1,18 @@
+{
+  "id": "task-003",
+  "description": "Create a Python module 'palindrome.py' at the repo root exporting an 'is_palindrome(s: str) -> bool' function. It should return True for palindromes ignoring case, spaces, and punctuation (only alphanumeric chars compared). Empty string is a palindrome. Tests in tests/test_palindrome.py must pass.",
+  "repo": "/Users/matteo/projects/catallaxy/repos/playground",
+  "base_branch": "main",
+  "review_fee": 2000,
+  "deterministic_checks": [
+    {
+      "type": "command",
+      "cmd": "python3 -m unittest tests.test_palindrome",
+      "must_pass": true
+    }
+  ],
+  "status": "completed",
+  "posted_by": "operator",
+  "posted_at": "2026-05-01T21:15:30.414Z",
+  "deadline_at": "2026-05-01T21:17:30.414Z"
+}

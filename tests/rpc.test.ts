@@ -1,0 +1,186 @@
+import { describe, expect, test, beforeAll, afterAll } from "bun:test";
+import { connect } from "node:net";
+import { mkdtemp, rm, mkdir, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+
+let workdir: string;
+let stop: () => Promise<void>;
+let port: number;
+let aliceTok: string;
+let bobTok: string;
+let reviewerTok: string;
+
+beforeAll(async () => {
+  workdir = await mkdtemp(join(tmpdir(), "catallaxy-rpc-"));
+  // Lay down a minimal market/agents/orchestrator tree so methods
+  // have files to read. The RPC server reads everything relative to
+  // process.cwd() and env-overridable paths.
+  await mkdir(`${workdir}/market/tasks`, { recursive: true });
+  await mkdir(`${workdir}/market/bids`, { recursive: true });
+  await mkdir(`${workdir}/market/assignments`, { recursive: true });
+  await mkdir(`${workdir}/market/review_requests`, { recursive: true });
+  await mkdir(`${workdir}/market/review_responses`, { recursive: true });
+  await mkdir(`${workdir}/agents/alice/sandbox`, { recursive: true });
+  await mkdir(`${workdir}/agents/bob/sandbox`, { recursive: true });
+  await mkdir(`${workdir}/orchestrator/private/history`, { recursive: true });
+  await writeFile(`${workdir}/orchestrator/private/audit/.keep`, "").catch(() => {});
+  await mkdir(`${workdir}/orchestrator/private/audit`, { recursive: true });
+  await writeFile(
+    `${workdir}/agents/alice/sandbox/balance.json`,
+    JSON.stringify({ balance: 12345, history: [] })
+  );
+  await writeFile(
+    `${workdir}/orchestrator/private/history/alice.md`,
+    "alice history line\n"
+  );
+  await writeFile(
+    `${workdir}/market/tasks/task-001.json`,
+    JSON.stringify({
+      id: "task-001",
+      description: "test task",
+      repo: "/tmp/repo",
+      base_branch: "main",
+      review_fee: 100,
+      deterministic_checks: [],
+      status: "open",
+      posted_by: "operator",
+      posted_at: new Date().toISOString(),
+      deadline_at: new Date(Date.now() + 60_000).toISOString(),
+    })
+  );
+
+  process.env.MARKET_DIR = `${workdir}/market`;
+  process.env.AGENTS_DIR = `${workdir}/agents`;
+  process.env.AGENT_HISTORY_DIR = `${workdir}/orchestrator/private/history`;
+  process.env.CATALLAXY_AUDIT_DIR = `${workdir}/orchestrator/private/audit`;
+  // Use an ephemeral port so concurrent test runs don't collide.
+  process.env.CATALLAXY_RPC_PORT = "0";
+
+  // Late-import so the env vars above take effect when methods.ts /
+  // server.ts read them at module scope.
+  const { generateTokens, REVIEWER_PRINCIPAL } = await import("../orchestrator/auth");
+  // A second import path with a query string would be cleaner, but
+  // method/server module caches the env once. Using port 0 is the
+  // workaround — the OS picks a free port and Bun.listen reports it.
+  // Bun.listen(unix? port? still need a way to recover the chosen
+  // port). Instead, claim a high random port up-front.
+  const tryPort = 9000 + Math.floor(Math.random() * 500);
+  process.env.CATALLAXY_RPC_PORT = String(tryPort);
+  port = tryPort;
+
+  const { startRpcServer } = await import("../orchestrator/rpc/server");
+  const tokens = generateTokens(["alice", "bob"]);
+  aliceTok = tokens.byAgent.get("alice")!;
+  bobTok = tokens.byAgent.get("bob")!;
+  reviewerTok = tokens.byAgent.get(REVIEWER_PRINCIPAL)!;
+  const handle = await startRpcServer(tokens);
+  stop = handle.stop;
+});
+
+afterAll(async () => {
+  await stop();
+  await rm(workdir, { recursive: true, force: true });
+});
+
+async function rpc(req: any): Promise<any> {
+  return new Promise((resolve, reject) => {
+    const s = connect({ host: "127.0.0.1", port });
+    let buf = "";
+    s.on("data", (c) => {
+      buf += c.toString();
+      const idx = buf.indexOf("\n");
+      if (idx >= 0) {
+        try { resolve(JSON.parse(buf.slice(0, idx))); }
+        catch (e) { reject(e); }
+        s.end();
+      }
+    });
+    s.on("error", reject);
+    s.on("connect", () => s.write(JSON.stringify(req) + "\n"));
+  });
+}
+
+describe("RPC end-to-end", () => {
+  test("valid token returns task list", async () => {
+    const r = await rpc({ id: 1, method: "list_tasks", auth: aliceTok });
+    expect(r.id).toBe(1);
+    expect(r.result.tasks).toHaveLength(1);
+    expect(r.result.tasks[0].id).toBe("task-001");
+  });
+
+  test("missing auth → UNAUTHORIZED", async () => {
+    const r = await rpc({ id: 2, method: "list_tasks" });
+    expect(r.error.code).toBe(7);
+  });
+
+  test("wrong token → UNAUTHORIZED", async () => {
+    const r = await rpc({ id: 3, method: "list_tasks", auth: "deadbeef" });
+    expect(r.error.code).toBe(7);
+  });
+
+  test("reviewer token rejected from RPC", async () => {
+    const r = await rpc({ id: 4, method: "list_tasks", auth: reviewerTok });
+    expect(r.error.code).toBe(7);
+  });
+
+  test("unknown method → UNKNOWN_METHOD", async () => {
+    const r = await rpc({ id: 5, method: "nope", auth: aliceTok });
+    expect(r.error.code).toBe(3);
+  });
+
+  test("place_bid validates params", async () => {
+    const r = await rpc({
+      id: 6, method: "place_bid", auth: aliceTok,
+      params: { task_id: "task-001", price: 0 },
+    });
+    expect(r.error.code).toBe(4);
+  });
+
+  test("place_bid writes bid file under correct agent", async () => {
+    const r = await rpc({
+      id: 7, method: "place_bid", auth: aliceTok,
+      params: { task_id: "task-001", price: 500 },
+    });
+    expect(r.result.bid.agent).toBe("alice");
+    expect(r.result.bid.price).toBe(500);
+    const bid = JSON.parse(
+      await Bun.file(`${workdir}/market/bids/task-001-alice.json`).text()
+    );
+    expect(bid.agent).toBe("alice");
+  });
+
+  test("my_balance returns the agent's balance.json contents", async () => {
+    const r = await rpc({ id: 8, method: "my_balance", auth: aliceTok });
+    expect(r.result.balance).toBe(12345);
+  });
+
+  test("my_balance for bob (no balance.json) returns null", async () => {
+    const r = await rpc({ id: 9, method: "my_balance", auth: bobTok });
+    expect(r.result.balance).toBe(null);
+  });
+
+  test("history returns the orchestrator-written log", async () => {
+    const r = await rpc({ id: 10, method: "history", auth: aliceTok });
+    expect(r.result.text).toContain("alice history line");
+  });
+
+  test("connection-pinning: alice's token can't switch to bob mid-stream", async () => {
+    // First frame establishes alice; second frame with bob's token
+    // is rejected.
+    const conn = connect({ host: "127.0.0.1", port });
+    await new Promise<void>((res) => conn.on("connect", () => res()));
+    const replies: string[] = [];
+    conn.on("data", (c) => replies.push(c.toString()));
+    conn.write(JSON.stringify({ id: 1, method: "list_tasks", auth: aliceTok }) + "\n");
+    conn.write(JSON.stringify({ id: 2, method: "list_tasks", auth: bobTok }) + "\n");
+    await new Promise((r) => setTimeout(r, 200));
+    conn.end();
+    const lines = replies.join("").split("\n").filter(Boolean).map((l) => JSON.parse(l));
+    expect(lines.length).toBeGreaterThanOrEqual(2);
+    const r1 = lines.find((l: any) => l.id === 1);
+    const r2 = lines.find((l: any) => l.id === 2);
+    expect(r1.result).toBeDefined();
+    expect(r2.error.code).toBe(7);
+  });
+});

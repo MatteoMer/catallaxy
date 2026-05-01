@@ -1,0 +1,18 @@
+{
+  "id": "task-009",
+  "description": "Create a TypeScript module 'lruCache.ts' at the repo root exporting a generic 'LRUCache<K, V>' class. The constructor takes a positive integer capacity and throws on zero or negative. Methods: 'get(key: K): V | undefined' (returns the value and refreshes recency on hit), 'set(key: K, value: V): void' (inserts or updates and makes the key most-recently-used; evicts the LRU entry if size would exceed capacity), 'has(key: K): boolean' (read-only — does NOT refresh recency), 'size' getter (current entry count), 'capacity' getter (constructor value). Tests in tests/lruCache.test.ts must pass.",
+  "repo": "/Users/matteo/projects/catallaxy/repos/playground",
+  "base_branch": "main",
+  "review_fee": 2000,
+  "deterministic_checks": [
+    {
+      "type": "command",
+      "cmd": "bun test tests/lruCache.test.ts",
+      "must_pass": true
+    }
+  ],
+  "status": "completed",
+  "posted_by": "operator",
+  "posted_at": "2026-05-01T21:34:14.085Z",
+  "deadline_at": "2026-05-01T21:36:14.085Z"
+}

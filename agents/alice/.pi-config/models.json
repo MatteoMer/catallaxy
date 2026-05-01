@@ -1,0 +1,7 @@
+{
+  "providers": {
+    "openrouter": {
+      "baseUrl": "http://catallaxy-gateway:8443/openrouter/api/v1"
+    }
+  }
+}

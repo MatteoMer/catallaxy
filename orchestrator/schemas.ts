@@ -34,7 +34,7 @@ export type Bid = z.infer<typeof BidSchema>;
 export const AssignmentSchema = z.object({
   task_id: z.string(),
   winner: z.string(),
-  payment: z.number().positive(),
+  payment: z.number().nonnegative(),
   assigned_at: Timestamp,
 });
 export type Assignment = z.infer<typeof AssignmentSchema>;

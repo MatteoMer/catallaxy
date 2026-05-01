@@ -8,6 +8,7 @@
 import { readdir } from "node:fs/promises";
 import { TaskSchema, BidSchema, type Task } from "./schemas";
 import { recordEvent } from "./ledger";
+import { prepareWorkDir } from "./workdir";
 import { dim, red, brightGreen, brightYellow } from "./log";
 
 const MARKET = process.env.MARKET_DIR ?? "./market";
@@ -90,6 +91,17 @@ export async function resolveAuctions(now: Date = new Date()): Promise<{ assigne
 
     const winner = validBids[0];
     const payment = winner.price;
+
+    // Pre-clone the task repo into the winner's work dir BEFORE we
+    // publish the assignment. The watcher's fs.watch on assignments/
+    // wakes the agent immediately, and we want the work tree ready by
+    // the time their pi process runs.
+    try {
+      await prepareWorkDir(winner.agent, task);
+    } catch (e) {
+      console.error(red(`  ${task.id}: prepareWorkDir failed for ${winner.agent}: ${e}`));
+      continue;
+    }
 
     const assignment = {
       task_id: task.id,

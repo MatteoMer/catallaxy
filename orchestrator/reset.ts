@@ -67,7 +67,7 @@ async function killRunningWatchers(): Promise<void> {
 }
 
 async function resetMarket(): Promise<void> {
-  for (const dir of ["tasks", "bids", "assignments", "review_requests", "review_responses"]) {
+  for (const dir of ["tasks", "bids", "assignments", "review_requests", "review_responses", "pending_summaries"]) {
     await rmrf(`${MARKET}/${dir}`);
   }
 }
@@ -90,7 +90,7 @@ async function resetAgents(): Promise<void> {
       if (!keepInSandbox.has(e)) await rmrf(`${sandbox}/${e}`);
     }
 
-    for (const stale of ["balance.json", "memory", "work"]) {
+    for (const stale of ["balance.json", "memory", "work", ".pi-config"]) {
       await rmrf(`${agentDir}/${stale}`);
     }
   }
@@ -99,6 +99,33 @@ async function resetAgents(): Promise<void> {
 async function resetOrchestrator(): Promise<void> {
   await rmrf(`${ROOT}/orchestrator/ledger.json`);
   await rmrf(`${ROOT}/orchestrator/private`);
+  // History was previously written into agents/{name}/sandbox/memory/history.md.
+  // Stale copies could mislead agents; resetAgents() already wipes them but
+  // we keep this comment as a breadcrumb for future archaeology.
+}
+
+/**
+ * Best-effort cleanup of leftover agent containers and the bridge
+ * network. A crashed watcher can leave per-wake containers dangling
+ * (`--rm` only fires on graceful exit); the next watcher startup
+ * would otherwise hit "name already in use" errors.
+ */
+async function resetDocker(): Promise<void> {
+  const list = Bun.spawn(
+    ["docker", "ps", "-a", "--filter", "name=catallaxy-agent-", "--filter", "name=catallaxy-gateway", "--format", "{{.ID}}"],
+    { stdout: "pipe", stderr: "pipe" }
+  );
+  const ids = (await new Response(list.stdout).text()).split("\n").map((s) => s.trim()).filter(Boolean);
+  await list.exited;
+  if (ids.length) {
+    const rm = Bun.spawn(["docker", "rm", "-f", ...ids], { stdout: "ignore", stderr: "ignore" });
+    await rm.exited;
+    console.log(`  removed ${ids.length} leftover agent/gateway container(s)`);
+  }
+  const netRm = Bun.spawn(["docker", "network", "rm", "catallaxy-agents"], {
+    stdout: "ignore", stderr: "ignore",
+  });
+  await netRm.exited;
 }
 
 async function resetPlayground(): Promise<void> {
@@ -124,6 +151,8 @@ await resetAgents();
 console.log("  agent runtime state wiped (memory, work, balance)");
 await resetOrchestrator();
 console.log("  ledger and reservations wiped");
+await resetDocker();
+console.log("  agent containers + bridge network cleaned");
 await resetPlayground();
 console.log("  playground reset to main");
 console.log("Done.");

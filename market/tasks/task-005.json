@@ -1,0 +1,18 @@
+{
+  "id": "task-005",
+  "description": "Create a Python module 'reverse_words.py' at the repo root exporting a 'reverse_words(s: str) -> str' function. It splits the input on whitespace, reverses the order of the words, and joins them with single spaces. Empty string returns empty string. Multiple/leading/trailing whitespace collapses to single spaces. Tests in tests/test_reverse_words.py must pass.",
+  "repo": "/Users/matteo/projects/catallaxy/repos/playground",
+  "base_branch": "main",
+  "review_fee": 2000,
+  "deterministic_checks": [
+    {
+      "type": "command",
+      "cmd": "python3 -m unittest tests.test_reverse_words",
+      "must_pass": true
+    }
+  ],
+  "status": "completed",
+  "posted_by": "operator",
+  "posted_at": "2026-05-01T21:22:50.700Z",
+  "deadline_at": "2026-05-01T21:24:50.700Z"
+}

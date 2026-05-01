@@ -1,0 +1,18 @@
+{
+  "id": "task-006",
+  "description": "Create a Python module 'count_vowels.py' at the repo root exporting a 'count_vowels(s: str) -> int' function. Returns the number of vowels (a, e, i, o, u — case-insensitive; y does NOT count) in the input string. Empty string returns 0. Tests in tests/test_count_vowels.py must pass.",
+  "repo": "/Users/matteo/projects/catallaxy/repos/playground",
+  "base_branch": "main",
+  "review_fee": 2000,
+  "deterministic_checks": [
+    {
+      "type": "command",
+      "cmd": "python3 -m unittest tests.test_count_vowels",
+      "must_pass": true
+    }
+  ],
+  "status": "completed",
+  "posted_by": "operator",
+  "posted_at": "2026-05-01T21:25:28.173Z",
+  "deadline_at": "2026-05-01T21:27:28.173Z"
+}

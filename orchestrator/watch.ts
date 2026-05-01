@@ -19,11 +19,18 @@ import { readdir, stat as fsStat, mkdir, rename, symlink, lstat, rm, unlink } fr
 import { existsSync, watch } from "node:fs";
 import {
   loadLedger, saveLedger, initAgent, debit, syncBalances, aliveAgents,
-  extractUsage, recordWakeup, recordEvent, type AgentUsage, type Ledger,
+  extractUsage, recordWakeup, recordEvent, flushPendingSummaries,
+  type AgentUsage, type Ledger,
 } from "./ledger";
 import { resolveAuctions } from "./exchange";
 import { processReviewRequests } from "./reviewer";
 import { TaskSchema, BidSchema, AssignmentSchema, ReviewRequestSchema, ReviewResponseSchema } from "./schemas";
+import { startRpcServer } from "./rpc/server";
+import { spawnAgent, ensureAgentNetwork } from "./spawnAgent";
+import { startProxyServer } from "./proxy/server";
+import { writeAgentConfig } from "./proxy/agentConfig";
+import { startGateway, stopGateway } from "./gateway";
+import { generateTokens, REVIEWER_PRINCIPAL, type TokenMap } from "./auth";
 import { dim, gray, cyan, magenta, brightMagenta, yellow, brightYellow, red, brightRed, green, brightGreen, bold, blue } from "./log";
 
 const AGENTS_DIR = process.env.AGENTS_DIR ?? "./agents";
@@ -155,6 +162,21 @@ function formatRelative(now: Date, target: Date): string {
   return past ? `${value} ago` : `in ${value}`;
 }
 
+async function loadLatestVerdict(taskId: string, agent: string): Promise<{ seq: number; verdict: string; feedback: string } | null> {
+  const dir = `${MARKET}/review_responses`;
+  let files: string[];
+  try { files = await readdir(dir); } catch { return null; }
+  let latest: { seq: number; verdict: string; feedback: string } | null = null;
+  for (const f of files) {
+    if (!f.endsWith(".json")) continue;
+    if (!f.startsWith(`${taskId}-${agent}-`)) continue;
+    const r = await readJsonOrNull(`${dir}/${f}`, ReviewResponseSchema);
+    if (!r) continue;
+    if (!latest || r.seq > latest.seq) latest = { seq: r.seq, verdict: r.verdict, feedback: r.feedback };
+  }
+  return latest;
+}
+
 async function buildWakePrompt(agent: string): Promise<string> {
   const now = new Date();
   const openIds: string[] = [];
@@ -174,6 +196,19 @@ async function buildWakePrompt(agent: string): Promise<string> {
   lines.push(`Wakeup at ${now.toISOString()} (UTC). You are ${agent}.`);
   lines.push(`Open auctions: ${openIds.length ? openIds.join(", ") : "none"}.`);
   lines.push(`Assigned to you: ${assignedIds.length ? assignedIds.join(", ") : "none"}.`);
+  for (const id of assignedIds) {
+    const v = await loadLatestVerdict(id, agent);
+    if (!v) {
+      lines.push(`  ${id}: no review yet — do the work and call request_review when ready.`);
+      continue;
+    }
+    if (v.verdict === "needs_work") {
+      lines.push(`  ${id}: review #${v.seq} → NEEDS WORK. Feedback:`);
+      for (const fl of v.feedback.split("\n")) lines.push(`    ${fl}`);
+    } else {
+      lines.push(`  ${id}: review #${v.seq} → ${v.verdict}.`);
+    }
+  }
   lines.push("");
   lines.push("Available market tools (call them — narrating them in text does not run them):");
   lines.push("  list_tasks       — list open auctions");
@@ -183,8 +218,9 @@ async function buildWakePrompt(agent: string): Promise<string> {
   lines.push("  request_review   — request review of your work");
   lines.push("  task_verdicts    — your verdicts on a task");
   lines.push("  my_balance       — your token balance");
+  lines.push("  history          — read your append-only history log");
   lines.push("");
-  lines.push("Before bidding: read EVERY line of `memory/history.md` — both the per-task `cost X, paid Y, net Z` summaries AND every individual `Wakeup cost: N tokens` line. Thinking tokens dominate; the `review_fee` is a small fraction of total cost. Bid NOTICEABLY ABOVE your expected TOTAL cost (this wake + future wakes for the task + review_fee), derived from your own history. Goal: grow balance, not win auctions. A winning bid below your cost loses you money — bankruptcy = game over. If the auction won't clear above your cost, sit it out.");
+  lines.push("Before bidding: call `history` and read EVERY line — both the per-task `cost X, paid Y, net Z` summaries AND every individual `Wakeup cost: N tokens` line. Thinking tokens dominate; the `review_fee` is a small fraction of total cost. Bid NOTICEABLY ABOVE your expected TOTAL cost (this wake + future wakes for the task + review_fee), derived from your own history. Goal: grow balance, not win auctions. A winning bid below your cost loses you money — bankruptcy = game over. If the auction won't clear above your cost, sit it out.");
   lines.push("Take a few actions then stop; another wakeup will fire when something relevant changes.");
   return lines.join("\n");
 }
@@ -215,23 +251,22 @@ function handlePiEvent(agent: string, line: string): void {
   }
 }
 
-async function runAgent(agent: string): Promise<string> {
+let wakeCounter = 0;
+
+async function runAgent(agent: string, tokens: TokenMap): Promise<string> {
   const prompt = await buildWakePrompt(agent);
   logPrefixed(`${agent}/wake-prompt`, prompt, magenta);
 
   const model = process.env.AGENT_MODEL ?? "openrouter/deepseek/deepseek-v4-flash";
-
-  const extensionPath = `${process.cwd()}/extensions/catallaxy.ts`;
-
-  const proc = Bun.spawn([
-    "pi",
-    "-p", prompt,
-    "--model", model,
-    "--api-key", process.env.OPENROUTER_API_KEY ?? "",
-    "--mode", "json",
-    "--no-session",
-    "-e", extensionPath,
-  ], { cwd: `${process.cwd()}/${AGENTS_DIR}/${agent}/sandbox`, stdout: "pipe", stderr: "pipe" });
+  const token = tokens.byAgent.get(agent);
+  if (!token) throw new Error(`no auth token for agent '${agent}'`);
+  const proc = spawnAgent({
+    agent,
+    prompt,
+    model,
+    authToken: token,
+    runTag: `w${++wakeCounter}`,
+  });
 
   const decoder = new TextDecoder();
   let buffer = "";
@@ -257,10 +292,10 @@ async function runAgent(agent: string): Promise<string> {
   return captured;
 }
 
-async function wakeAgent(agent: string, ledger: Ledger): Promise<void> {
+async function wakeAgent(agent: string, ledger: Ledger, tokens: TokenMap): Promise<void> {
   const at = new Date();
   console.log(brightMagenta(`  → waking ${agent} at ${at.toISOString().slice(11, 19)}`));
-  const output = await runAgent(agent);
+  const output = await runAgent(agent, tokens);
   const usage = extractUsage(output);
   if (usage.totalTokens > 0) {
     debit(ledger, agent, usage.totalTokens, `Wakeup: ${usage.totalTokens}tok ($${usage.costUsd.toFixed(4)})`, at);
@@ -268,6 +303,9 @@ async function wakeAgent(agent: string, ledger: Ledger): Promise<void> {
   }
   const ctx = await gatherWakeupContext(agent, at);
   await recordWakeup(agent, at, usage, ctx);
+  // Now that this wake's debit has posted, flush any task-completion
+  // summaries that were deferred while this wake was in flight.
+  await flushPendingSummaries(ledger, agent, new Date());
 }
 
 async function main() {
@@ -277,6 +315,24 @@ async function main() {
   console.log(cyan(`Agents: ${agentNames.join(", ")}`));
 
   for (const a of agentNames) await ensureSandbox(a);
+
+  await ensureAgentNetwork();
+  const tokens = generateTokens(agentNames);
+  for (const agent of agentNames) {
+    const tok = tokens.byAgent.get(agent)!;
+    await writeAgentConfig(agent, tok);
+  }
+  const rpc = await startRpcServer(tokens);
+  const proxy = await startProxyServer(tokens);
+  await startGateway();
+  const shutdown = async () => {
+    try { await stopGateway(); } catch {}
+    try { await proxy.stop(); } catch {}
+    try { await rpc.stop(); } catch {}
+    process.exit(0);
+  };
+  process.on("SIGINT", shutdown);
+  process.on("SIGTERM", shutdown);
 
   const systemPrompt = await Bun.file(`${process.cwd()}/SYSTEM.md`)
     .text()
@@ -289,7 +345,7 @@ async function main() {
   await syncBalances(ledger);
 
   // Ensure market subdirs exist before fs.watch attaches
-  for (const sub of ["tasks", "bids", "assignments", "review_requests", "review_responses"]) {
+  for (const sub of ["tasks", "bids", "assignments", "review_requests", "review_responses", "pending_summaries"]) {
     await mkdir(`${MARKET}/${sub}`, { recursive: true });
   }
 
@@ -304,7 +360,7 @@ async function main() {
   const safeProcessReviews = (): Promise<void> => {
     reviewQueue = reviewQueue.then(async () => {
       try {
-        await processReviewRequests(ledger, seenReviewRequests);
+        await processReviewRequests(ledger, seenReviewRequests, tokens.byAgent.get(REVIEWER_PRINCIPAL)!);
         await persist();
       } catch (e) {
         console.error("processReviewRequests error:", e);
@@ -358,7 +414,7 @@ async function main() {
 
     wakeStatus.set(agent, "running");
     try {
-      await wakeAgent(agent, ledger);
+      await wakeAgent(agent, ledger, tokens);
       lastWoken.set(agent, Date.now());
       await persist();
       await checkBankrupt();
@@ -515,6 +571,15 @@ async function main() {
       }
       await settleAndPersist();
       await safeProcessReviews();
+      // Safety net: if an agent's last wake already debited but the flush
+      // call inside wakeAgent somehow missed a marker (or the marker was
+      // written after the wake ended), catch it here. Skip agents with a
+      // wake in flight to avoid attributing an unrelated wake's cost to a
+      // completed task.
+      for (const agent of agentNames) {
+        if (wakeStatus.has(agent)) continue;
+        await flushPendingSummaries(ledger, agent, new Date());
+      }
       await checkBankrupt();
     } catch (e) {
       console.error("reconcile error:", e);
