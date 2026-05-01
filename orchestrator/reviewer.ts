@@ -6,7 +6,7 @@
  * Each review call debits review_fee upfront.
  */
 
-import { readdir, stat as fsStat } from "node:fs/promises";
+import { readdir } from "node:fs/promises";
 import {
   TaskSchema,
   AssignmentSchema,
@@ -86,9 +86,10 @@ export async function processReviewRequests(ledger: Ledger, seen: Set<string>): 
         console.log(`  ${req.task_id}: LGTM → +${assignment.payment} to ${req.agent}`);
 
         const closeAt = new Date();
-        const bidPath = `${MARKET}/bids/${req.task_id}-${req.agent}.json`;
-        const bidStat = await fsStat(bidPath).catch(() => null);
-        const fromTime = bidStat ? new Date(bidStat.mtimeMs) : new Date(req.requested_at);
+        // Cost window starts at task.posted_at so the wake that decided the
+        // bid is included (debits are timestamped at wake start, before the
+        // bid file mtime).
+        const fromTime = new Date(task.posted_at);
         const s = summarizeWindow(ledger, req.agent, fromTime, closeAt);
         const totalCost = s.thinking + s.reviewFees;
         await recordEvent(
