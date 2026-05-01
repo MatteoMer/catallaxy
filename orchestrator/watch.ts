@@ -15,7 +15,7 @@
  * Usage: bun orchestrator/watch.ts
  */
 
-import { readdir, stat as fsStat, mkdir, rename, symlink, lstat, rm } from "node:fs/promises";
+import { readdir, stat as fsStat, mkdir, rename, symlink, lstat, rm, unlink } from "node:fs/promises";
 import { existsSync, watch } from "node:fs";
 import {
   loadLedger, saveLedger, initAgent, debit, syncBalances, aliveAgents,
@@ -218,11 +218,6 @@ async function runAgent(agent: string): Promise<string> {
 
   const model = process.env.AGENT_MODEL ?? "openrouter/z-ai/glm-5.1";
 
-  const env = {
-    ...process.env,
-    PATH: `${process.cwd()}/bin:${process.env.PATH ?? ""}`,
-  };
-
   const extensionPath = `${process.cwd()}/extensions/catallaxy.ts`;
 
   const proc = Bun.spawn([
@@ -233,7 +228,7 @@ async function runAgent(agent: string): Promise<string> {
     "--mode", "json",
     "--no-session",
     "-e", extensionPath,
-  ], { cwd: `${process.cwd()}/${AGENTS_DIR}/${agent}/sandbox`, env, stdout: "pipe", stderr: "pipe" });
+  ], { cwd: `${process.cwd()}/${AGENTS_DIR}/${agent}/sandbox`, stdout: "pipe", stderr: "pipe" });
 
   const decoder = new TextDecoder();
   let buffer = "";
@@ -404,18 +399,6 @@ async function main() {
   // Watcher infrastructure
   const knownFiles = new Map<string, Set<string>>();
 
-  const rejectMalformed = async (subdir: string, file: string, kind: string, howTo: string) => {
-    const fullPath = `${MARKET}/${subdir}/${file}`;
-    console.warn(`malformed ${kind} ${file} — deleting and warning agents`);
-    await rm(fullPath, { force: true });
-    // Keep the warning short and abstract — no file paths or schema details
-    // leak into agents' history. Just point at the right command.
-    const warning = `A malformed ${kind} attempt was rejected. ${howTo}`;
-    for (const a of agentNames) {
-      await recordEvent(a, new Date(), warning);
-    }
-  };
-
   const handleAdded = async (subdir: string, file: string): Promise<void> => {
     const fullPath = `${MARKET}/${subdir}/${file}`;
     if (subdir === "tasks") {
@@ -423,44 +406,24 @@ async function main() {
       if (!t) return;
       console.log(`new task: ${t.id}`);
       scheduleDeadline(t);
-      // Refresh-style: a running wake's tools will see the task too. No queue.
       for (const a of agentNames) triggerWake(a, false);
     } else if (subdir === "bids") {
       const b = await readJsonOrNull(fullPath, BidSchema);
-      if (!b) {
-        await rejectMalformed(
-          subdir,
-          file,
-          "bid",
-          "Place bids using the `place_bid` tool."
-        );
-        return;
-      }
-      // Refresh-style: a running wake can see the bid via tools. No queue.
+      if (!b) return;
       for (const a of agentNames) {
         if (a !== b.agent) triggerWake(a, false);
       }
     } else if (subdir === "assignments") {
       const a = await readJsonOrNull(fullPath, AssignmentSchema);
       if (!a) return;
-      // Actionable: winner needs to do the work. Queue if running.
       triggerWake(a.winner, true);
     } else if (subdir === "review_requests") {
       const r = await readJsonOrNull(fullPath, ReviewRequestSchema);
-      if (!r) {
-        await rejectMalformed(
-          subdir,
-          file,
-          "review request",
-          "Request reviews using the `request_review` tool."
-        );
-        return;
-      }
+      if (!r) return;
       await safeProcessReviews();
     } else if (subdir === "review_responses") {
       const r = await readJsonOrNull(fullPath, ReviewResponseSchema);
       if (!r) return;
-      // Actionable: agent must read the verdict. Queue if running.
       triggerWake(r.agent, true);
     }
   };
