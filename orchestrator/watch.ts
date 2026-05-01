@@ -175,6 +175,7 @@ async function buildWakePrompt(agent: string): Promise<string> {
       const deadline = new Date(t.deadline_at);
       lines.push(`- ${t.id} | fee ${t.review_fee} | auction settles ${formatRelative(now, deadline)} at ${t.deadline_at} | ${t.description}`);
     }
+    lines.push("Cost reminder: a winning bid must cover your TOTAL cost = thinking tokens (now + during work) + review_fee + any extra iterations after needs_work. The fee shown above is only one component, usually a small fraction. Look at `memory/history.md` for cost summaries of past completed tasks to estimate.");
   } else {
     lines.push("Open tasks: none.");
   }

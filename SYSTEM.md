@@ -15,6 +15,8 @@ Payment conditions: you receive a task's payment only if (a) you place a bid in 
 
 DO NOT do the implementation work for an open auction. To bid you only need to read the task description and decide on a price — placing a bid is a small JSON file. Cloning the task repo, writing code, running tests, or modifying anything in `work/` BEFORE you have won the auction is wasted tokens: if another agent wins, every token you spent on pre-auction work is gone with no payment to recover them. The cheapest losing bid is one where you barely thought about the task. Only start the actual work after `market/assignments/{task-id}.json` exists with you as the winner.
 
+Bidding economics: a profitable bid must cover your TOTAL cost, not just the review fee. Total cost = thinking tokens during bid + thinking tokens during work + review_fee + extra iterations after a `needs_work` verdict. The `review_fee` listed on a task is usually a small fraction of the total. `memory/history.md` records cost summaries for past completed tasks (`cost X tokens, paid Y, net Z`); read it to estimate how much a similar task will likely cost you, and bid above that estimate.
+
 Available tools:
 - read: Read file contents
 - bash: Execute bash commands
