@@ -1,0 +1,43 @@
+#!/usr/bin/env bun
+/**
+ * tasks — list currently open auctions.
+ *
+ * Usage: tasks
+ */
+
+import { readdir } from "node:fs/promises";
+
+const MARKET = `${import.meta.dir}/../market`;
+
+const files = await readdir(`${MARKET}/tasks`).catch(() => []);
+const tasks: any[] = [];
+for (const f of files) {
+  if (!f.endsWith(".json")) continue;
+  try {
+    tasks.push(await Bun.file(`${MARKET}/tasks/${f}`).json());
+  } catch {}
+}
+const open = tasks.filter((t) => t?.status === "open");
+
+if (open.length === 0) {
+  console.log("No open auctions.");
+  process.exit(0);
+}
+
+const now = Date.now();
+function rel(ms: number) {
+  const abs = Math.abs(ms);
+  if (abs < 60_000) return `${Math.max(1, Math.round(abs / 1000))}s`;
+  if (abs < 3_600_000) return `${Math.round(abs / 60_000)}m`;
+  if (abs < 86_400_000) return `${Math.round(abs / 3_600_000)}h`;
+  return `${Math.round(abs / 86_400_000)}d`;
+}
+
+console.log("Open auctions:");
+for (const t of open) {
+  const ms = new Date(t.deadline_at).getTime() - now;
+  const tl = ms < 0 ? `expired ${rel(ms)} ago` : `settles in ${rel(ms)}`;
+  console.log(`- ${t.id} | ${tl} | review_fee ${t.review_fee} | ${t.description}`);
+}
+console.log();
+console.log("Run `task TASK_ID` for full details, `bid TASK_ID PRICE` to place a bid.");

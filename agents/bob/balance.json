@@ -1,0 +1,107 @@
+{
+  "balance": -412586,
+  "history": [
+    {
+      "at": "2026-04-29T21:14:53.472Z",
+      "type": "debit_thinking",
+      "amount": 41206,
+      "description": "Wakeup: 41206tok ($0.0275)"
+    },
+    {
+      "at": "2026-04-29T21:20:28.269Z",
+      "type": "debit_thinking",
+      "amount": 1711,
+      "description": "Wakeup: 1711tok ($0.0011)"
+    },
+    {
+      "at": "2026-04-29T21:23:53.405Z",
+      "type": "debit_thinking",
+      "amount": 1699,
+      "description": "Wakeup: 1699tok ($0.0011)"
+    },
+    {
+      "at": "2026-04-29T21:24:51.386Z",
+      "type": "debit_thinking",
+      "amount": 1698,
+      "description": "Wakeup: 1698tok ($0.0011)"
+    },
+    {
+      "at": "2026-04-29T21:27:34.212Z",
+      "type": "debit_thinking",
+      "amount": 18501,
+      "description": "Wakeup: 18501tok ($0.0142)"
+    },
+    {
+      "at": "2026-04-29T21:38:56.233Z",
+      "type": "debit_thinking",
+      "amount": 1689,
+      "description": "Wakeup: 1689tok ($0.0011)"
+    },
+    {
+      "at": "2026-04-29T21:40:49.423Z",
+      "type": "debit_thinking",
+      "amount": 50881,
+      "description": "Wakeup: 50881tok ($0.0333)"
+    },
+    {
+      "at": "2026-04-29T21:55:32.608Z",
+      "type": "debit_thinking",
+      "amount": 79959,
+      "description": "Wakeup: 79959tok ($0.0551)"
+    },
+    {
+      "at": "2026-04-29T22:24:39.327Z",
+      "type": "debit_thinking",
+      "amount": 53714,
+      "description": "Wakeup: 53714tok ($0.0391)"
+    },
+    {
+      "at": "2026-04-30T14:35:18.519Z",
+      "type": "debit_thinking",
+      "amount": 36449,
+      "description": "Wakeup: 36449tok ($0.0243)"
+    },
+    {
+      "at": "2026-04-30T14:44:21.355Z",
+      "type": "debit_thinking",
+      "amount": 993528,
+      "description": "Wakeup: 993528tok ($0.5690)"
+    },
+    {
+      "at": "2026-04-30T15:19:56.723Z",
+      "type": "debit_thinking",
+      "amount": 1500,
+      "description": "Review fee: task-003 #1"
+    },
+    {
+      "at": "2026-04-30T15:20:06.988Z",
+      "type": "credit_bounty",
+      "amount": 400,
+      "description": "Accepted: task-003"
+    },
+    {
+      "at": "2026-04-30T15:20:06.991Z",
+      "type": "debit_thinking",
+      "amount": 1500,
+      "description": "Review fee: task-002 #1"
+    },
+    {
+      "at": "2026-04-30T15:20:16.284Z",
+      "type": "credit_bounty",
+      "amount": 400,
+      "description": "Accepted: task-002"
+    },
+    {
+      "at": "2026-04-30T15:20:16.288Z",
+      "type": "debit_thinking",
+      "amount": 1714,
+      "description": "Wakeup: 1714tok ($0.0012)"
+    },
+    {
+      "at": "2026-05-01T12:28:42.663Z",
+      "type": "debit_thinking",
+      "amount": 127637,
+      "description": "Wakeup: 127637tok ($0.0793)"
+    }
+  ]
+}

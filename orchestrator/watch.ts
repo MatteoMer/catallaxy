@@ -66,9 +66,12 @@ async function ensureSandbox(agent: string): Promise<void> {
   if (!(await existsLink(linkSysmd))) {
     await symlink("../../../SYSTEM.md", linkSysmd);
   }
+  // Remove market symlink if present from older layouts. Agents interact
+  // with the market only via commands (tasks, task, bid, submit, etc.) —
+  // they have no direct filesystem access to market state.
   const linkMarket = `${sandboxDir}/market`;
-  if (!(await existsLink(linkMarket))) {
-    await symlink("../../../market", linkMarket);
+  if (await existsLink(linkMarket)) {
+    await rm(linkMarket, { force: true });
   }
 }
 
@@ -151,40 +154,23 @@ function formatRelative(now: Date, target: Date): string {
 
 async function buildWakePrompt(agent: string): Promise<string> {
   const now = new Date();
-  type TaskInfo = { id: string; status: string; description: string; review_fee: number; deadline_at: string };
-  const tasks: TaskInfo[] = [];
+  let openCount = 0;
   for (const f of await listJsonFiles(`${MARKET}/tasks`)) {
     const t = await readJsonOrNull(`${MARKET}/tasks/${f}`, TaskSchema);
-    if (t) tasks.push({ id: t.id, status: t.status, description: t.description, review_fee: t.review_fee, deadline_at: t.deadline_at });
+    if (t && t.status === "open") openCount++;
   }
-  const open = tasks.filter((t) => t.status === "open");
-
-  const assignedToMe: TaskInfo[] = [];
+  let assignedCount = 0;
   for (const f of await listJsonFiles(`${MARKET}/assignments`)) {
     const a = await readJsonOrNull(`${MARKET}/assignments/${f}`, AssignmentSchema);
     if (!a || a.winner !== agent) continue;
-    const task = tasks.find((t) => t.id === a.task_id);
-    if (task && task.status === "assigned") assignedToMe.push(task);
+    const t = await readJsonOrNull(`${MARKET}/tasks/${a.task_id}.json`, TaskSchema);
+    if (t && t.status === "assigned") assignedCount++;
   }
 
   const lines: string[] = [];
   lines.push(`Wakeup at ${now.toISOString()} (UTC). You are ${agent}.`);
-  if (open.length) {
-    lines.push("Open auctions — BID ONLY, do NOT start the work yet (read the task, write a bid file, that's it):");
-    for (const t of open) {
-      const deadline = new Date(t.deadline_at);
-      lines.push(`- ${t.id} | fee ${t.review_fee} | auction settles ${formatRelative(now, deadline)} at ${t.deadline_at} | ${t.description}`);
-    }
-    lines.push("Cost reminder: a winning bid must cover your TOTAL cost = thinking tokens (now + during work) + review_fee + any extra iterations after needs_work. The fee shown above is only one component, usually a small fraction. Look at `memory/history.md` for cost summaries of past completed tasks to estimate.");
-  } else {
-    lines.push("Open tasks: none.");
-  }
-  if (assignedToMe.length) {
-    lines.push("Assigned to you — you won, NOW do the work (clone repo into work/{task-id}/, implement, call review):");
-    for (const t of assignedToMe) {
-      lines.push(`- ${t.id} | ${t.description}`);
-    }
-  }
+  lines.push(`Open auctions: ${openCount}. Active assignments: ${assignedCount}.`);
+  lines.push("Commands: `tasks`, `task TASK_ID`, `assignments`, `verdicts TASK_ID`, `bid TASK_ID PRICE`, `submit TASK_ID BRANCH`, `balance`.");
   return lines.join("\n");
 }
 
@@ -406,7 +392,9 @@ async function main() {
     const fullPath = `${MARKET}/${subdir}/${file}`;
     console.warn(`malformed ${kind} ${file} — deleting and warning agents`);
     await rm(fullPath, { force: true });
-    const warning = `Invalid ${kind} file '${file}' was rejected and deleted (wrong schema or filename). ${howTo}`;
+    // Keep the warning short and abstract — no file paths or schema details
+    // leak into agents' history. Just point at the right command.
+    const warning = `A malformed ${kind} attempt was rejected. ${howTo}`;
     for (const a of agentNames) {
       await recordEvent(a, new Date(), warning);
     }
@@ -428,7 +416,7 @@ async function main() {
           subdir,
           file,
           "bid",
-          "Bids must be placed by running `bid TASK_ID PRICE` as a bash command. Hand-written JSON files in market/bids/ are not accepted."
+          "Place bids by running `bid TASK_ID PRICE` as a bash command."
         );
         return;
       }
@@ -447,8 +435,8 @@ async function main() {
         await rejectMalformed(
           subdir,
           file,
-          "review_request",
-          "Review requests must be placed by running `submit TASK_ID BRANCH` as a bash command. Hand-written JSON files in market/review_requests/ are not accepted."
+          "review request",
+          "Request reviews by running `submit TASK_ID BRANCH` as a bash command."
         );
         return;
       }
