@@ -411,11 +411,11 @@ async function main() {
       scheduleDeadline(t);
       for (const a of agentNames) triggerWake(a, false);
     } else if (subdir === "bids") {
+      // Don't wake other agents on bid events. Each wake costs tokens
+      // and the value of "react to a competitor's bid" is small —
+      // agents can see live state via the list_tasks tool if they care.
       const b = await readJsonOrNull(fullPath, BidSchema);
       if (!b) return;
-      for (const a of agentNames) {
-        if (a !== b.agent) triggerWake(a, false);
-      }
     } else if (subdir === "assignments") {
       const a = await readJsonOrNull(fullPath, AssignmentSchema);
       if (!a) return;
