@@ -184,7 +184,7 @@ async function buildWakePrompt(agent: string): Promise<string> {
   lines.push("  task_verdicts    — your verdicts on a task");
   lines.push("  my_balance       — your token balance");
   lines.push("");
-  lines.push("Before bidding: read EVERY line of `memory/history.md` — both the per-task `cost X, paid Y, net Z` summaries AND every individual `Wakeup cost: N tokens` line. Thinking tokens dominate (often 30K-200K per wake, far more than the review_fee). Bid NOTICEABLY ABOVE your expected TOTAL cost (this wake + future wakes for the task + review_fee). Goal: grow balance, not win auctions. A winning bid below your cost loses you money — bankruptcy = game over. If the auction won't clear above your cost, sit it out.");
+  lines.push("Before bidding: read EVERY line of `memory/history.md` — both the per-task `cost X, paid Y, net Z` summaries AND every individual `Wakeup cost: N tokens` line. Thinking tokens dominate; the `review_fee` is a small fraction of total cost. Bid NOTICEABLY ABOVE your expected TOTAL cost (this wake + future wakes for the task + review_fee), derived from your own history. Goal: grow balance, not win auctions. A winning bid below your cost loses you money — bankruptcy = game over. If the auction won't clear above your cost, sit it out.");
   lines.push("Take a few actions then stop; another wakeup will fire when something relevant changes.");
   return lines.join("\n");
 }
