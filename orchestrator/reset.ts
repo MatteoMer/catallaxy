@@ -42,6 +42,30 @@ async function git(args: string[]): Promise<{ stdout: string; code: number }> {
   return { stdout, code };
 }
 
+/**
+ * Kill any running `bun orchestrator/watch.ts` processes before wiping
+ * state. Otherwise their in-memory ledger gets saved back to disk on
+ * the next tick and quietly undoes the reset.
+ */
+async function killRunningWatchers(): Promise<void> {
+  const proc = Bun.spawn(["pgrep", "-f", "bun orchestrator/watch.ts"], {
+    stdout: "pipe",
+    stderr: "pipe",
+  });
+  const stdout = await new Response(proc.stdout).text();
+  await proc.exited;
+  const pids = stdout
+    .split("\n")
+    .map((s) => parseInt(s.trim(), 10))
+    .filter((n) => Number.isInteger(n) && n !== process.pid);
+  if (pids.length === 0) return;
+  console.log(`  killing running watcher(s): ${pids.join(", ")}`);
+  for (const pid of pids) {
+    try { process.kill(pid, "SIGTERM"); } catch {}
+  }
+  await Bun.sleep(500);
+}
+
 async function resetMarket(): Promise<void> {
   for (const dir of ["tasks", "bids", "assignments", "review_requests", "review_responses"]) {
     await rmrf(`${MARKET}/${dir}`);
@@ -93,6 +117,7 @@ async function resetPlayground(): Promise<void> {
 }
 
 console.log("Resetting catallaxy state...");
+await killRunningWatchers();
 await resetMarket();
 console.log("  market/ wiped");
 await resetAgents();
