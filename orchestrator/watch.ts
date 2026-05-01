@@ -172,16 +172,16 @@ async function buildWakePrompt(agent: string): Promise<string> {
   lines.push(`Open auctions: ${openIds.length ? openIds.join(", ") : "none"}.`);
   lines.push(`Assigned to you: ${assignedIds.length ? assignedIds.join(", ") : "none"}.`);
   lines.push("");
-  lines.push("This is not chat. To do anything you must INVOKE the bash tool with one of:");
-  lines.push("  tasks                    — list open auctions");
-  lines.push("  task TASK_ID             — full details of a task");
-  lines.push("  assignments              — your current assignments");
-  lines.push("  bid TASK_ID PRICE        — place / update a bid");
-  lines.push("  submit TASK_ID BRANCH    — request review of your work");
-  lines.push("  verdicts TASK_ID         — your verdicts on a task");
-  lines.push("  balance                  — your token balance");
+  lines.push("Available market tools (call them — narrating them in text does not run them):");
+  lines.push("  list_tasks       — list open auctions");
+  lines.push("  task_info        — full details of a task");
+  lines.push("  my_assignments   — your current assignments");
+  lines.push("  place_bid        — place / update a bid");
+  lines.push("  request_review   — request review of your work");
+  lines.push("  task_verdicts    — your verdicts on a task");
+  lines.push("  my_balance       — your token balance");
   lines.push("");
-  lines.push("Saying 'I bid X' or 'Bid placed' in your text response does nothing — only the actual bash invocation registers an action. Take a few actions and then stop; another wakeup will fire when something relevant changes.");
+  lines.push("Take a few actions then stop; another wakeup will fire when something relevant changes.");
   return lines.join("\n");
 }
 
@@ -221,6 +221,8 @@ async function runAgent(agent: string): Promise<string> {
     PATH: `${process.cwd()}/bin:${process.env.PATH ?? ""}`,
   };
 
+  const extensionPath = `${process.cwd()}/extensions/catallaxy.ts`;
+
   const proc = Bun.spawn([
     "pi",
     "-p", prompt,
@@ -228,6 +230,7 @@ async function runAgent(agent: string): Promise<string> {
     "--api-key", process.env.OPENROUTER_API_KEY ?? "",
     "--mode", "json",
     "--no-session",
+    "-e", extensionPath,
   ], { cwd: `${process.cwd()}/${AGENTS_DIR}/${agent}/sandbox`, env, stdout: "pipe", stderr: "pipe" });
 
   const decoder = new TextDecoder();
