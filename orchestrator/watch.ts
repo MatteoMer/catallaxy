@@ -298,6 +298,21 @@ async function main() {
   const wakeStatus = new Map<string, "running" | "pending">();
   const lastWoken = new Map<string, number>();
 
+  // Serialize processReviewRequests calls so two concurrent fs.watch
+  // events for the same review_request file can't double-process it.
+  let reviewQueue: Promise<void> = Promise.resolve();
+  const safeProcessReviews = (): Promise<void> => {
+    reviewQueue = reviewQueue.then(async () => {
+      try {
+        await processReviewRequests(ledger, seenReviewRequests);
+        await persist();
+      } catch (e) {
+        console.error("processReviewRequests error:", e);
+      }
+    });
+    return reviewQueue;
+  };
+
   const persist = async () => {
     await saveLedger(ledger);
     await syncBalances(ledger);
@@ -409,12 +424,7 @@ async function main() {
       // Actionable: winner needs to do the work. Queue if running.
       triggerWake(a.winner, true);
     } else if (subdir === "review_requests") {
-      try {
-        await processReviewRequests(ledger, seenReviewRequests);
-        await persist();
-      } catch (e) {
-        console.error("processReviewRequests error:", e);
-      }
+      await safeProcessReviews();
     } else if (subdir === "review_responses") {
       const r = await readJsonOrNull(fullPath, ReviewResponseSchema);
       if (!r) return;
@@ -465,8 +475,7 @@ async function main() {
 
   // Settle any already-expired auctions on startup, process pending reviews
   await settleAndPersist();
-  await processReviewRequests(ledger, seenReviewRequests);
-  await persist();
+  await safeProcessReviews();
 
   // Attach watchers
   for (const sub of ["tasks", "bids", "assignments", "review_requests", "review_responses"]) {
@@ -505,8 +514,7 @@ async function main() {
         }
       }
       await settleAndPersist();
-      await processReviewRequests(ledger, seenReviewRequests);
-      await persist();
+      await safeProcessReviews();
       await checkBankrupt();
     } catch (e) {
       console.error("reconcile error:", e);
