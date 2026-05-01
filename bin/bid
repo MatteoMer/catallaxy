@@ -1,0 +1,41 @@
+#!/usr/bin/env bun
+/**
+ * bid — place or update a bid on an open task.
+ *
+ * Usage (from inside an agent sandbox): bid TASK_ID PRICE
+ *
+ * Reads identity.json in CWD for the agent name, writes a correctly
+ * formatted bid file to market/bids/{TASK_ID}-{agent}.json.
+ */
+
+const [, , taskId, priceStr] = process.argv;
+if (!taskId || !priceStr) {
+  console.error("Usage: bid TASK_ID PRICE");
+  process.exit(1);
+}
+const price = Number(priceStr);
+if (!Number.isFinite(price) || price <= 0 || !Number.isInteger(price)) {
+  console.error("PRICE must be a positive integer (tokens)");
+  process.exit(1);
+}
+
+let identity: { name?: string };
+try {
+  identity = await Bun.file("identity.json").json();
+} catch {
+  console.error("could not read identity.json from CWD; run this from your sandbox");
+  process.exit(1);
+}
+if (!identity.name) {
+  console.error("identity.json missing 'name' field");
+  process.exit(1);
+}
+
+const bid = {
+  task_id: taskId,
+  agent: identity.name,
+  price,
+  created_at: new Date().toISOString(),
+};
+await Bun.write(`market/bids/${taskId}-${identity.name}.json`, JSON.stringify(bid, null, 2));
+console.log(`bid: ${taskId} @ ${price} by ${identity.name}`);

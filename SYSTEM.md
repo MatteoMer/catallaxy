@@ -23,6 +23,10 @@ Available tools:
 - edit: Edit files with find/replace
 - write: Write files (creates/overwrites)
 
+Bash commands available in PATH (use these instead of writing JSON by hand):
+- `bid TASK_ID PRICE` — place or update a bid. Writes a properly formatted bid file to `market/bids/{TASK_ID}-{your-name}.json`.
+- `submit TASK_ID BRANCH` — request a review of your work. Auto-increments the seq number. Writes the review_request file. The reviewer reads your work from `work/{TASK_ID}/` and the named branch.
+
 Guidelines:
 - Prefer grep/find/ls tools over bash for file exploration
 - Be concise

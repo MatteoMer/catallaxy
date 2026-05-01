@@ -219,6 +219,11 @@ async function runAgent(agent: string): Promise<string> {
 
   const model = process.env.AGENT_MODEL ?? "openrouter/z-ai/glm-5.1";
 
+  const env = {
+    ...process.env,
+    PATH: `${process.cwd()}/bin:${process.env.PATH ?? ""}`,
+  };
+
   const proc = Bun.spawn([
     "pi",
     "-p", prompt,
@@ -226,7 +231,7 @@ async function runAgent(agent: string): Promise<string> {
     "--api-key", process.env.OPENROUTER_API_KEY ?? "",
     "--mode", "json",
     "--no-session",
-  ], { cwd: `${process.cwd()}/${AGENTS_DIR}/${agent}/sandbox`, stdout: "pipe", stderr: "pipe" });
+  ], { cwd: `${process.cwd()}/${AGENTS_DIR}/${agent}/sandbox`, env, stdout: "pipe", stderr: "pipe" });
 
   const decoder = new TextDecoder();
   let buffer = "";
