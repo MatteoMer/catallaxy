@@ -67,11 +67,13 @@ async function ensureSandbox(agent: string): Promise<void> {
     await symlink("../../../SYSTEM.md", linkSysmd);
   }
   // Remove market symlink if present from older layouts. Agents interact
-  // with the market only via commands (tasks, task, bid, submit, etc.) —
-  // they have no direct filesystem access to market state.
+  // with the market only via pi tools (list_tasks, place_bid, etc.) — they
+  // have no direct filesystem access to market state.
+  // Use unlink (not rm) because the symlink resolves to a directory and rm
+  // would try to operate on the target, returning EACCES.
   const linkMarket = `${sandboxDir}/market`;
   if (await existsLink(linkMarket)) {
-    await rm(linkMarket, { force: true });
+    await unlink(linkMarket);
   }
 }
 
