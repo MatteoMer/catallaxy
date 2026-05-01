@@ -219,7 +219,7 @@ async function runAgent(agent: string): Promise<string> {
   const prompt = await buildWakePrompt(agent);
   logPrefixed(`${agent}/wake-prompt`, prompt, magenta);
 
-  const model = process.env.AGENT_MODEL ?? "openrouter/z-ai/glm-5.1";
+  const model = process.env.AGENT_MODEL ?? "openrouter/deepseek/deepseek-v4-flash";
 
   const extensionPath = `${process.cwd()}/extensions/catallaxy.ts`;
 
