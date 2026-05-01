@@ -6,7 +6,7 @@
  * Each review call debits review_fee upfront.
  */
 
-import { readdir, stat as fsStat } from "node:fs/promises";
+import { readdir } from "node:fs/promises";
 import {
   TaskSchema,
   AssignmentSchema,
@@ -32,6 +32,9 @@ export async function processReviewRequests(ledger: Ledger, seen: Set<string>): 
   for (const f of files) {
     if (!f.endsWith(".json")) continue;
     if (seen.has(f)) continue;
+    // Mark seen synchronously BEFORE any await — prevents a concurrent
+    // call to processReviewRequests from also picking up this file.
+    seen.add(f);
 
     try {
       const req = ReviewRequestSchema.parse(
@@ -43,7 +46,6 @@ export async function processReviewRequests(ledger: Ledger, seen: Set<string>): 
 
       if (task.status !== "assigned") {
         console.log(`  review ${f}: task ${task.id} status=${task.status}, skipping`);
-        seen.add(f);
         continue;
       }
 
@@ -53,7 +55,6 @@ export async function processReviewRequests(ledger: Ledger, seen: Set<string>): 
 
       if (assignment.winner !== req.agent) {
         console.log(`  review ${f}: ${req.agent} not winner of ${req.task_id} (${assignment.winner})`);
-        seen.add(f);
         continue;
       }
 
@@ -77,6 +78,14 @@ export async function processReviewRequests(ledger: Ledger, seen: Set<string>): 
       );
 
       if (result.lgtm) {
+        // Re-check task status: another review request for the same task
+        // could have been processed concurrently and already marked it
+        // completed. Don't double-credit.
+        const taskNow = await Bun.file(`${MARKET}/tasks/${req.task_id}.json`).json().catch(() => null);
+        if (!taskNow || taskNow.status !== "assigned") {
+          console.log(`  ${req.task_id}: LGTM but task already ${taskNow?.status ?? "missing"}; not double-crediting`);
+          continue;
+        }
         credit(ledger, req.agent, assignment.payment, `Accepted: ${req.task_id}`);
         const completed: Task = { ...task, status: "completed" };
         await Bun.write(
@@ -86,9 +95,10 @@ export async function processReviewRequests(ledger: Ledger, seen: Set<string>): 
         console.log(`  ${req.task_id}: LGTM → +${assignment.payment} to ${req.agent}`);
 
         const closeAt = new Date();
-        const bidPath = `${MARKET}/bids/${req.task_id}-${req.agent}.json`;
-        const bidStat = await fsStat(bidPath).catch(() => null);
-        const fromTime = bidStat ? new Date(bidStat.mtimeMs) : new Date(req.requested_at);
+        // Cost window starts at task.posted_at so the wake that decided the
+        // bid is included (debits are timestamped at wake start, before the
+        // bid file mtime).
+        const fromTime = new Date(task.posted_at);
         const s = summarizeWindow(ledger, req.agent, fromTime, closeAt);
         const totalCost = s.thinking + s.reviewFees;
         await recordEvent(
@@ -100,11 +110,9 @@ export async function processReviewRequests(ledger: Ledger, seen: Set<string>): 
         console.log(`  ${req.task_id}: needs_work (#${req.seq})`);
       }
 
-      seen.add(f);
       processed++;
     } catch (e) {
       console.error(`Skipping review request ${f}:`, e);
-      seen.add(f);
     }
   }
 

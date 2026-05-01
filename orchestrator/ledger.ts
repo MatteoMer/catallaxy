@@ -71,7 +71,7 @@ export function aliveAgents(ledger: Ledger): string[] {
  */
 export async function syncBalances(ledger: Ledger): Promise<void> {
   for (const [agent, data] of Object.entries(ledger)) {
-    const path = `${AGENTS_DIR}/${agent}/balance.json`;
+    const path = `${AGENTS_DIR}/${agent}/sandbox/balance.json`;
     await Bun.write(path, JSON.stringify(data, null, 2));
   }
 }
@@ -132,7 +132,7 @@ export async function recordWakeup(
     reviewsCalled: { task_id: string; seq: number }[];
   }
 ): Promise<void> {
-  const path = `${AGENTS_DIR}/${agent}/memory/history.md`;
+  const path = `${AGENTS_DIR}/${agent}/sandbox/memory/history.md`;
   const lines: string[] = [];
 
   const timestamp = at.toISOString().replace("T", " ").slice(0, 19);
@@ -176,7 +176,7 @@ export function summarizeWindow(
 }
 
 export async function recordEvent(agent: string, at: Date, message: string): Promise<void> {
-  const path = `${AGENTS_DIR}/${agent}/memory/history.md`;
+  const path = `${AGENTS_DIR}/${agent}/sandbox/memory/history.md`;
   const timestamp = at.toISOString().replace("T", " ").slice(0, 19);
   await appendToFile(path, `### ${timestamp} — ${message}\n\n`);
 }
