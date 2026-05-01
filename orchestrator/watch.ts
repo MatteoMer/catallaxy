@@ -468,18 +468,32 @@ async function main() {
   await processReviewRequests(ledger, seenReviewRequests);
   await persist();
 
-  // Attach watchers BEFORE initial wake so that bids placed during the
-  // initial wake fire handlers naturally (price-war wakeups).
+  // Attach watchers
   for (const sub of ["tasks", "bids", "assignments", "review_requests", "review_responses"]) {
     await watchSubdir(sub);
   }
   console.log("Watchers attached.");
 
-  // Initial wake of all alive agents
-  console.log("Initial wakeup...");
-  const initialAgents = aliveAgents(ledger).filter((n) => agentNames.includes(n));
-  await Promise.allSettled(initialAgents.map((a) => triggerWake(a)));
-  console.log("Initial wakeup complete. Idling for events.");
+  // Replay existing actionable state as events (no unconditional wake).
+  // - Open auctions wake all agents (refresh; running wake's tools cover it).
+  // - Active assignments wake their winner (must react, queue if running).
+  let anyOpen = false;
+  for (const f of await listJsonFiles(`${MARKET}/tasks`)) {
+    const t = await readJsonOrNull(`${MARKET}/tasks/${f}`, TaskSchema);
+    if (t && t.status === "open") { anyOpen = true; break; }
+  }
+  if (anyOpen) {
+    for (const a of aliveAgents(ledger).filter((n) => agentNames.includes(n))) {
+      triggerWake(a, false);
+    }
+  }
+  for (const f of await listJsonFiles(`${MARKET}/assignments`)) {
+    const ass = await readJsonOrNull(`${MARKET}/assignments/${f}`, AssignmentSchema);
+    if (!ass) continue;
+    const t = await readJsonOrNull(`${MARKET}/tasks/${ass.task_id}.json`, TaskSchema);
+    if (t && t.status === "assigned") triggerWake(ass.winner, true);
+  }
+  console.log("Idling for events.");
 
   // Periodic reconciler — safety net for missed file events
   setInterval(async () => {
