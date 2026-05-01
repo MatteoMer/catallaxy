@@ -430,7 +430,7 @@ async function main() {
           subdir,
           file,
           "bid",
-          "Place bids by running `bid TASK_ID PRICE` as a bash command."
+          "Place bids using the `place_bid` tool."
         );
         return;
       }
@@ -450,7 +450,7 @@ async function main() {
           subdir,
           file,
           "review request",
-          "Request reviews by running `submit TASK_ID BRANCH` as a bash command."
+          "Request reviews using the `request_review` tool."
         );
         return;
       }
