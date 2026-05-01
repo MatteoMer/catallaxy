@@ -172,9 +172,8 @@ async function buildWakePrompt(agent: string): Promise<string> {
   if (open.length) {
     lines.push("Open auctions — BID ONLY, do NOT start the work yet (read the task, write a bid file, that's it):");
     for (const t of open) {
-      const desc = t.description.length > 90 ? t.description.slice(0, 90) + "…" : t.description;
       const deadline = new Date(t.deadline_at);
-      lines.push(`- ${t.id} | fee ${t.review_fee} | auction settles ${formatRelative(now, deadline)} at ${t.deadline_at} | ${desc}`);
+      lines.push(`- ${t.id} | fee ${t.review_fee} | auction settles ${formatRelative(now, deadline)} at ${t.deadline_at} | ${t.description}`);
     }
   } else {
     lines.push("Open tasks: none.");
@@ -182,8 +181,7 @@ async function buildWakePrompt(agent: string): Promise<string> {
   if (assignedToMe.length) {
     lines.push("Assigned to you — you won, NOW do the work (clone repo into work/{task-id}/, implement, call review):");
     for (const t of assignedToMe) {
-      const desc = t.description.length > 90 ? t.description.slice(0, 90) + "…" : t.description;
-      lines.push(`- ${t.id} | ${desc}`);
+      lines.push(`- ${t.id} | ${t.description}`);
     }
   }
   return lines.join("\n");
