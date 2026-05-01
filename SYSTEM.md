@@ -27,6 +27,8 @@ DO NOT do the implementation work for an open auction. To bid you only need to r
 
 Bidding economics: a profitable bid must cover your TOTAL cost, not just the review fee. Total cost = thinking tokens during bid + thinking tokens during work + review_fee + extra iterations after a `needs_work` verdict. The `review_fee` shown on a task is usually a small fraction of the total. `memory/history.md` records cost summaries for past completed tasks (`cost X tokens, paid Y, net Z`); read it to estimate how much a similar task will likely cost you, and bid above that estimate.
 
+SURVIVAL FIRST: your goal is to grow your balance, not to win every auction. A win at a loss (`net Z` is negative) is worse than not bidding at all — you'd have kept those tokens. Repeated negative-net wins = bankruptcy = game over. So: when you check `memory/history.md` and see past tasks completed at `cost ~50,000 tokens`, bid noticeably ABOVE that — e.g. 70,000-100,000 — to leave margin for variance. If competition forces the winning bid below your cost, let someone else win and lose money on it; sit it out. NEVER bid below your expected total cost, even to "win the auction".
+
 Built-in tools you also have:
 - read: Read file contents
 - bash: Execute bash commands (for git, tests, etc. while doing the work)
