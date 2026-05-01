@@ -402,6 +402,16 @@ async function main() {
   // Watcher infrastructure
   const knownFiles = new Map<string, Set<string>>();
 
+  const rejectMalformed = async (subdir: string, file: string, kind: string, howTo: string) => {
+    const fullPath = `${MARKET}/${subdir}/${file}`;
+    console.warn(`malformed ${kind} ${file} — deleting and warning agents`);
+    await rm(fullPath, { force: true });
+    const warning = `Invalid ${kind} file '${file}' was rejected and deleted (wrong schema or filename). ${howTo}`;
+    for (const a of agentNames) {
+      await recordEvent(a, new Date(), warning);
+    }
+  };
+
   const handleAdded = async (subdir: string, file: string): Promise<void> => {
     const fullPath = `${MARKET}/${subdir}/${file}`;
     if (subdir === "tasks") {
@@ -413,7 +423,15 @@ async function main() {
       for (const a of agentNames) triggerWake(a, false);
     } else if (subdir === "bids") {
       const b = await readJsonOrNull(fullPath, BidSchema);
-      if (!b) return;
+      if (!b) {
+        await rejectMalformed(
+          subdir,
+          file,
+          "bid",
+          "Bids must be placed by running `bid TASK_ID PRICE` as a bash command. Hand-written JSON files in market/bids/ are not accepted."
+        );
+        return;
+      }
       // Refresh-style: a running wake can see the bid via tools. No queue.
       for (const a of agentNames) {
         if (a !== b.agent) triggerWake(a, false);
@@ -424,6 +442,16 @@ async function main() {
       // Actionable: winner needs to do the work. Queue if running.
       triggerWake(a.winner, true);
     } else if (subdir === "review_requests") {
+      const r = await readJsonOrNull(fullPath, ReviewRequestSchema);
+      if (!r) {
+        await rejectMalformed(
+          subdir,
+          file,
+          "review_request",
+          "Review requests must be placed by running `submit TASK_ID BRANCH` as a bash command. Hand-written JSON files in market/review_requests/ are not accepted."
+        );
+        return;
+      }
       await safeProcessReviews();
     } else if (subdir === "review_responses") {
       const r = await readJsonOrNull(fullPath, ReviewResponseSchema);
