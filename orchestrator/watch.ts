@@ -154,23 +154,34 @@ function formatRelative(now: Date, target: Date): string {
 
 async function buildWakePrompt(agent: string): Promise<string> {
   const now = new Date();
-  let openCount = 0;
+  const openIds: string[] = [];
   for (const f of await listJsonFiles(`${MARKET}/tasks`)) {
     const t = await readJsonOrNull(`${MARKET}/tasks/${f}`, TaskSchema);
-    if (t && t.status === "open") openCount++;
+    if (t && t.status === "open") openIds.push(t.id);
   }
-  let assignedCount = 0;
+  const assignedIds: string[] = [];
   for (const f of await listJsonFiles(`${MARKET}/assignments`)) {
     const a = await readJsonOrNull(`${MARKET}/assignments/${f}`, AssignmentSchema);
     if (!a || a.winner !== agent) continue;
     const t = await readJsonOrNull(`${MARKET}/tasks/${a.task_id}.json`, TaskSchema);
-    if (t && t.status === "assigned") assignedCount++;
+    if (t && t.status === "assigned") assignedIds.push(a.task_id);
   }
 
   const lines: string[] = [];
   lines.push(`Wakeup at ${now.toISOString()} (UTC). You are ${agent}.`);
-  lines.push(`Open auctions: ${openCount}. Active assignments: ${assignedCount}.`);
-  lines.push("Commands: `tasks`, `task TASK_ID`, `assignments`, `verdicts TASK_ID`, `bid TASK_ID PRICE`, `submit TASK_ID BRANCH`, `balance`.");
+  lines.push(`Open auctions: ${openIds.length ? openIds.join(", ") : "none"}.`);
+  lines.push(`Assigned to you: ${assignedIds.length ? assignedIds.join(", ") : "none"}.`);
+  lines.push("");
+  lines.push("This is not chat. To do anything you must INVOKE the bash tool with one of:");
+  lines.push("  tasks                    — list open auctions");
+  lines.push("  task TASK_ID             — full details of a task");
+  lines.push("  assignments              — your current assignments");
+  lines.push("  bid TASK_ID PRICE        — place / update a bid");
+  lines.push("  submit TASK_ID BRANCH    — request review of your work");
+  lines.push("  verdicts TASK_ID         — your verdicts on a task");
+  lines.push("  balance                  — your token balance");
+  lines.push("");
+  lines.push("Saying 'I bid X' or 'Bid placed' in your text response does nothing — only the actual bash invocation registers an action. Take a few actions and then stop; another wakeup will fire when something relevant changes.");
   return lines.join("\n");
 }
 
