@@ -7,6 +7,7 @@
     "watch": "make image-if-needed && bun orchestrator/watch.ts",
     "exchange": "bun orchestrator/exchange.ts",
     "ledger": "bun orchestrator/ledger.ts",
+    "status": "bun orchestrator/status.ts",
     "create-agent": "bun orchestrator/create-agent.ts",
     "create-task": "bun orchestrator/create-task.ts",
     "pretrain": "make image-if-needed && bun orchestrator/pretrain.ts",

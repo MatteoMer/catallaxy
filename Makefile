@@ -1,4 +1,4 @@
-.PHONY: image image-if-needed image-push watch pretrain reset clean help
+.PHONY: image image-if-needed image-push watch pretrain status reset clean help
 
 IMAGE_TAG ?= catallaxy-agent:latest
 PI_VERSION ?= 0.70.6
@@ -9,6 +9,7 @@ help:
 	@echo "  image-push    build and push to registry"
 	@echo "  watch         start the orchestrator watcher"
 	@echo "  pretrain      run the pretrain bootstrap (stop watcher first)"
+	@echo "  status        summarize live market / agents / review queue"
 	@echo "  reset         wipe runtime state (market/, ledgers, sockets, containers)"
 	@echo "  clean         reset + remove the agent image and bridge network"
 
@@ -28,6 +29,9 @@ watch:
 pretrain:
 	@docker image inspect $(IMAGE_TAG) >/dev/null 2>&1 || $(MAKE) image
 	bun orchestrator/pretrain.ts $(filter-out $@,$(MAKECMDGOALS))
+
+status:
+	bun orchestrator/status.ts
 
 reset:
 	bun orchestrator/reset.ts
