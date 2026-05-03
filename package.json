@@ -8,6 +8,7 @@
     "exchange": "bun orchestrator/exchange.ts",
     "ledger": "bun orchestrator/ledger.ts",
     "status": "bun orchestrator/status.ts",
+    "trace": "bun orchestrator/trace.ts",
     "create-agent": "bun orchestrator/create-agent.ts",
     "create-task": "bun orchestrator/create-task.ts",
     "pretrain": "make image-if-needed && bun orchestrator/pretrain.ts",

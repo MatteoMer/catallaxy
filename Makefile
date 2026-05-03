@@ -1,4 +1,4 @@
-.PHONY: image image-if-needed image-push watch pretrain status reset clean help
+.PHONY: image image-if-needed image-push watch pretrain status trace reset clean help
 
 IMAGE_TAG ?= catallaxy-agent:latest
 PI_VERSION ?= 0.70.6
@@ -10,6 +10,7 @@ help:
 	@echo "  watch         start the orchestrator watcher"
 	@echo "  pretrain      run the pretrain bootstrap (stop watcher first)"
 	@echo "  status        summarize live market / agents / review queue"
+	@echo "  trace         show per-task timeline (TASK=task-001)"
 	@echo "  reset         wipe runtime state (market/, ledgers, sockets, containers)"
 	@echo "  clean         reset + remove the agent image and bridge network"
 
@@ -32,6 +33,12 @@ pretrain:
 
 status:
 	bun orchestrator/status.ts
+
+trace:
+ifndef TASK
+	$(error TASK required: make trace TASK=task-001)
+endif
+	bun orchestrator/trace.ts $(TASK)
 
 reset:
 	bun orchestrator/reset.ts
