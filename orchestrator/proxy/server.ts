@@ -11,9 +11,9 @@
  * over HTTPS.
  *
  * No CONNECT / HTTPS-tunneling: end-to-end TLS would defeat key
- * injection. Pi (agents) is configured via models.json baseUrl, and
- * claude (reviewer) via ANTHROPIC_BASE_URL — both plain HTTP into
- * this proxy.
+ * injection. Pi agents are configured via models.json baseUrl. The
+ * reviewer currently runs pi on the host by default using local Codex
+ * auth; this proxy remains available for providers routed through it.
  */
 
 import { createServer, type Server, type IncomingMessage, type ServerResponse } from "node:http";
@@ -102,9 +102,9 @@ function extractToken(req: IncomingMessage): string | null {
   if (typeof explicit === "string" && explicit) return explicit;
   if (Array.isArray(explicit) && explicit[0]) return explicit[0];
   // Fall back to whatever upstream auth header the SDK populated.
-  // Pi sets `--api-key` → Authorization: Bearer <key>. Claude sets
-  // ANTHROPIC_API_KEY → x-api-key: <key>. Either way the agent or
-  // reviewer's catallaxy token rides in there.
+  // Pi sets `--api-key` → Authorization: Bearer <key>; Anthropic SDKs
+  // often set x-api-key. Either way the caller's catallaxy token rides
+  // in there.
   const auth = req.headers["authorization"];
   if (typeof auth === "string") {
     const m = /^Bearer\s+(.+)$/i.exec(auth.trim());

@@ -34,14 +34,9 @@ RUN curl -fsSL https://deb.nodesource.com/setup_20.x | bash - \
  && apt-get install -y --no-install-recommends nodejs \
  && rm -rf /var/lib/apt/lists/*
 
-# Install pi (agents) and claude-code (reviewer) as global npm
-# packages. The same image is used for both — which binary runs is
-# decided by the spawn args. Keeping one image avoids drift between
-# the agent's and reviewer's isolation profile.
-ARG CLAUDE_VERSION=2.1.126
-RUN npm install -g \
-    "@mariozechner/pi-coding-agent@${PI_VERSION}" \
-    "@anthropic-ai/claude-code@${CLAUDE_VERSION}"
+# Install pi. The same image is used for agents and (optional) sandboxed
+# reviews; which prompt/model runs is decided by the spawn args.
+RUN npm install -g "@mariozechner/pi-coding-agent@${PI_VERSION}"
 
 # Bundle the catallaxy extension into the image so the container has
 # no need to mount the host repo. The bind-mounted /sandbox is the

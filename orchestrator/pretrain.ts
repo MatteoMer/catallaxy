@@ -18,7 +18,7 @@
  * Net effect: agents experienced the real economy, learned what
  * tasks cost them, but enter the live economy with full balance.
  *
- * Pretrain is self-contained: it spawns its own pi and claude -p, never
+ * Pretrain is self-contained: it spawns its own pi reviewer/agents, never
  * goes through the watcher's debit/credit paths. The watcher's
  * financial code stays untouched, so there is zero risk of pretrain
  * accidentally moving money.
@@ -291,7 +291,7 @@ async function runPi(agent: string, prompt: string, tokens: TokenMap): Promise<{
  */
 async function runReview(task: Task, branch: string, seq: number, agent: string, reviewerToken: string): Promise<{ lgtm: boolean; feedback: string }> {
   const lines: string[] = [];
-  lines.push(`Review the diff on branch '${branch}' against base '${task.base_branch}'. Run \`git diff ${task.base_branch}...${branch}\` to see the changes.`);
+  lines.push(`Review the diff on branch '${branch}' against base '${task.base_branch}'. Run \`git diff ${task.base_branch}...${branch}\` to see the changes. Do not modify files.`);
   lines.push("");
   lines.push(`Task: ${task.description}`);
   if (task.subjective_criteria) lines.push(`Criteria: ${task.subjective_criteria}`);

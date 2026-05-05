@@ -10,6 +10,8 @@ services:
     environment:
       - OPENROUTER_API_KEY
       - AGENT_MODEL
+      - REVIEWER_MODEL
+      - REVIEWER_THINKING
     depends_on:
       - agent-network
 

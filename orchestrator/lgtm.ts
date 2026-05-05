@@ -1,7 +1,7 @@
 /**
  * Robust LGTM detection for reviewer output.
  *
- * The prompt asks for `LGTM` and nothing else, but claude often
+ * The prompt asks for `LGTM` and nothing else, but reviewers often
  * adds a preamble or trailing context anyway ("All 10 tests pass.
  * Implementation correctly uses Kahn's algorithm... LGTM"). The
  * verdict is what matters, not the strictness of the format.

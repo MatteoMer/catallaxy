@@ -1,5 +1,5 @@
 /**
- * Reviewer — handles review_requests by invoking `claude -p`.
+ * Reviewer — handles review_requests by invoking `pi -p`.
  *
  * One LGTM = full bid payment + task closes.
  * Otherwise = needs_work feedback returned to the agent.
@@ -160,7 +160,7 @@ async function runReview(
 function buildReviewPrompt(task: Task, req: ReviewRequest): string {
   const lines: string[] = [];
   lines.push(
-    `Review the diff on branch '${req.branch}' against base '${task.base_branch}'. Run \`git diff ${task.base_branch}...${req.branch}\` to see the changes.`
+    `Review the diff on branch '${req.branch}' against base '${task.base_branch}'. Run \`git diff ${task.base_branch}...${req.branch}\` to see the changes. Do not modify files.`
   );
   lines.push("");
   lines.push(`Task: ${task.description}`);

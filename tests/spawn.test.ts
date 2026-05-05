@@ -10,6 +10,7 @@ process.env.AGENTS_DIR = `${tmp}/agents`;
 process.env.BUN_SPAWN_AGENT_DIRECT = ""; // force container path
 
 const { buildDockerArgs, buildPiArgs } = await import("../orchestrator/spawnAgent");
+const { buildReviewerPiArgs, buildReviewerDockerArgs } = await import("../orchestrator/spawnReviewer");
 
 describe("spawnAgent argument construction", () => {
   const opts = {
@@ -74,5 +75,42 @@ describe("spawnAgent argument construction", () => {
     const args = buildDockerArgs(opts, buildPiArgs(opts));
     const nameIdx = args.indexOf("--name");
     expect(args[nameIdx + 1]).toBe("catallaxy-agent-alice-w42");
+  });
+});
+
+
+describe("spawnReviewer argument construction", () => {
+  const opts = {
+    prompt: "review this",
+    workDir: `${tmp}/work/task-001`,
+    authToken: "tok-reviewer",
+    runTag: "task-001-alice-1",
+  };
+
+  test("reviewer uses pi with Codex gpt-5.5 at medium thinking", () => {
+    const args = buildReviewerPiArgs(opts);
+    expect(args[0]).toBe("pi");
+    expect(args).toContain("--model");
+    expect(args[args.indexOf("--model") + 1]).toBe("openai-codex/gpt-5.5");
+    expect(args).toContain("--thinking");
+    expect(args[args.indexOf("--thinking") + 1]).toBe("medium");
+    expect(args).toContain("--no-session");
+    expect(args).toContain("--tools");
+    expect(args[args.indexOf("--tools") + 1]).toBe("read,bash,grep,find,ls");
+    expect(args).toContain("--no-context-files");
+  });
+
+  test("reviewer docker args keep work tree read-only and do not inject upstream keys", () => {
+    const args = buildReviewerDockerArgs(opts, buildReviewerPiArgs(opts));
+    expect(args).toContain("--read-only");
+    expect(args).toContain("--network");
+    expect(args[args.indexOf("--network") + 1]).toBe("catallaxy-agents");
+    const mounts = args.filter((_, i) => i > 0 && args[i - 1] === "-v");
+    expect(mounts).toContain(`${opts.workDir}:/work:ro`);
+    const envFlags = args.filter((_, i) => i > 0 && args[i - 1] === "-e");
+    expect(envFlags).toContain(`CATALLAXY_AUTH_TOKEN=${opts.authToken}`);
+    expect(envFlags.some((e) => e.startsWith("OPENROUTER_API_KEY="))).toBe(false);
+    expect(envFlags.some((e) => e.startsWith("ANTHROPIC_API_KEY="))).toBe(false);
+    expect(envFlags.some((e) => e.startsWith("OPENAI_API_KEY="))).toBe(false);
   });
 });
