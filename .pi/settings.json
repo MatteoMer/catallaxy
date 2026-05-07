@@ -1,0 +1,7 @@
+{
+  "quietStartup": true,
+  "enableInstallTelemetry": false,
+  "warnings": {
+    "anthropicExtraUsage": false
+  }
+}
