@@ -49,6 +49,19 @@ export function debit(
   entry.history.push({ at: at.toISOString(), type: "debit_thinking", amount, description });
 }
 
+export function debitReviewFee(
+  ledger: Ledger,
+  agent: string,
+  amount: number,
+  description: string,
+  at: Date = new Date()
+): void {
+  const entry = ledger[agent];
+  if (!entry) return;
+  entry.balance -= amount;
+  entry.history.push({ at: at.toISOString(), type: "debit_review_fee", amount, description });
+}
+
 export function credit(
   ledger: Ledger,
   agent: string,
@@ -182,6 +195,31 @@ export function summarizeWindow(
   return { thinking, reviewFees, received, net: received - thinking - reviewFees };
 }
 
+export function summarizeTaskSettlement(
+  ledger: Ledger,
+  agent: string,
+  taskId: string,
+  fromTime: Date,
+  toTime: Date
+): { thinking: number; reviewFees: number; received: number; net: number } {
+  const entry = ledger[agent];
+  if (!entry) return { thinking: 0, reviewFees: 0, received: 0, net: 0 };
+  let thinking = 0;
+  let reviewFees = 0;
+  let received = 0;
+  for (const h of entry.history) {
+    const t = new Date(h.at).getTime();
+    if (h.type === "debit_thinking" && t >= fromTime.getTime() && t <= toTime.getTime()) {
+      thinking += h.amount;
+    }
+    // Settlement amounts are task-addressed in ledger descriptions, so keep
+    // them exact instead of relying on overlapping time windows.
+    if (h.description.startsWith(`Review fee: ${taskId}`)) reviewFees += h.amount;
+    if (h.description === `Accepted: ${taskId}`) received += h.amount;
+  }
+  return { thinking, reviewFees, received, net: received - thinking - reviewFees };
+}
+
 export async function recordEvent(agent: string, at: Date, message: string): Promise<void> {
   const path = `${HISTORY_DIR}/${agent}.md`;
   const timestamp = at.toISOString().replace("T", " ").slice(0, 19);
@@ -213,6 +251,16 @@ export async function writePendingSummary(p: PendingSummary): Promise<void> {
  * debit could be attributed to the completed task). `toTime` is the upper
  * bound of the cost window — typically "now" at the moment of the call.
  */
+async function taskBrief(taskId: string): Promise<string> {
+  try {
+    const task = await Bun.file(`${MARKET}/tasks/${taskId}.json`).json();
+    const desc = String(task.description ?? "").replace(/\s+/g, " ").trim();
+    return desc.length > 180 ? desc.slice(0, 180) + "…" : desc;
+  } catch {
+    return "(task details unavailable)";
+  }
+}
+
 export async function flushPendingSummaries(
   ledger: Ledger,
   agent: string,
@@ -234,13 +282,18 @@ export async function flushPendingSummaries(
       continue;
     }
     if (p.agent !== agent) continue;
-    const s = summarizeWindow(ledger, agent, new Date(p.from_time), toTime);
+    const s = summarizeTaskSettlement(ledger, agent, p.task_id, new Date(p.from_time), toTime);
     const totalCost = s.thinking + s.reviewFees;
-    await recordEvent(
-      agent,
-      toTime,
-      `task ${p.task_id} completed — paid ${s.received}, cost ${totalCost} (thinking ${s.thinking}, review fees ${s.reviewFees}), net ${s.net}`
-    );
+    const timestamp = toTime.toISOString().replace("T", " ").slice(0, 19);
+    const lines = [
+      `### ${timestamp} — completed task ${p.task_id}`,
+      `Task: ${await taskBrief(p.task_id)}`,
+      `Payment: ${s.received}`,
+      `Cost: ${totalCost} (thinking ${s.thinking}, review fees ${s.reviewFees})`,
+      `Net: ${s.net}`,
+      "",
+    ];
+    await appendToFile(`${HISTORY_DIR}/${agent}.md`, lines.join("\n"));
     await unlink(path).catch(() => {});
   }
 }

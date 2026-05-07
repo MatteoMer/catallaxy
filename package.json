@@ -4,7 +4,7 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "watch": "make image-if-needed && bun orchestrator/watch.ts",
+    "watch": "make image-if-needed && bun orchestrator/watch-live.ts",
     "exchange": "bun orchestrator/exchange.ts",
     "ledger": "bun orchestrator/ledger.ts",
     "status": "bun orchestrator/status.ts",
@@ -14,7 +14,7 @@
     "pretrain": "make image-if-needed && bun orchestrator/pretrain.ts",
     "reset": "bun orchestrator/reset.ts",
     "image": "docker/build.sh",
-    "test": "bun test tests/auth.test.ts tests/rpc.test.ts tests/proxy.test.ts tests/spawn.test.ts tests/lgtm.test.ts"
+    "test": "bun test tests/auth.test.ts tests/rpc.test.ts tests/proxy.test.ts tests/spawn.test.ts tests/lgtm.test.ts tests/markdown.test.ts tests/ledger.test.ts"
   },
   "dependencies": {
     "zod": "^3.24.0"

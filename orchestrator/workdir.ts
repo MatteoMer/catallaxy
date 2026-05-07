@@ -8,7 +8,7 @@
  * agent's first wake fires) and reused across iterations.
  */
 
-import { mkdir } from "node:fs/promises";
+import { mkdir, rm } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import type { Task } from "./schemas";
 
@@ -26,6 +26,7 @@ export function workDirFor(agent: string, taskId: string): string {
 export async function prepareWorkDir(agent: string, task: Task): Promise<string> {
   const dir = workDirFor(agent, task.id);
   if (existsSync(`${dir}/.git`)) return dir;
+  if (existsSync(dir)) await rm(dir, { recursive: true, force: true });
 
   await mkdir(dir, { recursive: true });
   const proc = Bun.spawn(["git", "clone", task.repo, dir], {

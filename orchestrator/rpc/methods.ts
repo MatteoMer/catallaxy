@@ -110,6 +110,8 @@ export async function place_bid(agent: string, params: any): Promise<{ bid: any 
   if (typeof price !== "number" || !Number.isFinite(price) || price < 1 || !Number.isInteger(price)) {
     throw new Error("price must be a positive integer");
   }
+  const balance = await my_balance(agent, null);
+  if ((balance.balance ?? 0) <= 0) throw new Error("bankrupt agents cannot bid");
   const bid = {
     task_id: taskId,
     agent,
@@ -128,6 +130,8 @@ export async function request_review(agent: string, params: any): Promise<{ requ
   const branch = params?.branch;
   if (typeof taskId !== "string") throw new Error("task_id required");
   if (typeof branch !== "string" || !branch) throw new Error("branch required");
+  const balance = await my_balance(agent, null);
+  if ((balance.balance ?? 0) <= 0) throw new Error("bankrupt agents cannot request review");
   const existing = (await listJson(`${MARKET}/review_requests`))
     .filter((f) => f.startsWith(`${taskId}-${agent}-`));
   const seq = existing.length + 1;

@@ -38,6 +38,8 @@ export interface SpawnOpts {
   agent: string;
   prompt: string;
   model: string;
+  /** Optional comma allowlist of pi tools for this wake. */
+  tools?: string[];
   /** This agent's auth token (validated by RPC + proxy on every call). */
   authToken: string;
   /** Tag suffix for the container name (e.g. wake counter / task id). */
@@ -115,7 +117,7 @@ export function buildPiArgs(opts: SpawnOpts): string[] {
   // baseUrl. The proxy validates the token, identifies this agent,
   // strips the header, and injects the real OpenRouter key. The
   // container never sees the real upstream key.
-  return [
+  const args = [
     "pi",
     "-p", opts.prompt,
     "--model", opts.model,
@@ -124,6 +126,8 @@ export function buildPiArgs(opts: SpawnOpts): string[] {
     "--no-session",
     "-e", extensionPath,
   ];
+  if (opts.tools?.length) args.push("--tools", opts.tools.join(","));
+  return args;
 }
 
 /**

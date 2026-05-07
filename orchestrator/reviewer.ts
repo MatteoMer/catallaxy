@@ -15,7 +15,7 @@ import {
   type Task,
   type ReviewRequest,
 } from "./schemas";
-import { debit, credit, writePendingSummary, type Ledger } from "./ledger";
+import { debitReviewFee, credit, writePendingSummary, recordEvent, type Ledger } from "./ledger";
 import { workDirFor } from "./workdir";
 import { spawnReviewer } from "./spawnReviewer";
 import { isLgtm } from "./lgtm";
@@ -66,7 +66,7 @@ export async function processReviewRequests(
         continue;
       }
 
-      debit(ledger, req.agent, task.review_fee, `Review fee: ${req.task_id} #${req.seq}`);
+      debitReviewFee(ledger, req.agent, task.review_fee, `Review fee: ${req.task_id} #${req.seq}`);
       console.log(red(`  review ${req.task_id} #${req.seq}: -${task.review_fee} from ${req.agent}`));
 
       const result = await runReview(task, req, reviewerToken);
@@ -113,6 +113,8 @@ export async function processReviewRequests(
         });
       } else {
         console.log(brightRed(`  ${req.task_id}: needs_work (#${req.seq})`));
+        const feedback = result.feedback.replace(/\s+/g, " ").trim();
+        await recordEvent(req.agent, new Date(), `review ${req.task_id} #${req.seq} → needs_work — ${feedback.slice(0, 220)}`);
       }
 
       processed++;

@@ -1,10 +1,11 @@
 /**
  * Tiny ANSI color helper for orchestrator logs.
- * Falls back to plain text when stdout isn't a TTY (so piping to a log
- * file stays clean).
+ * Falls back to plain text when stdout isn't a TTY unless FORCE_COLOR is set.
+ * watch-live.ts sets FORCE_COLOR=1 so shared watcher logs keep ANSI colors.
  */
 
-const useColor = process.stdout.isTTY;
+const forceColor = process.env.FORCE_COLOR && process.env.FORCE_COLOR !== "0";
+const useColor = !!(process.stdout.isTTY || forceColor);
 
 export const C = {
   reset: "\x1b[0m",

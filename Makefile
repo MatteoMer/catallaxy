@@ -7,7 +7,7 @@ help:
 	@echo "Targets:"
 	@echo "  image         build the agent container image (multi-arch if buildx)"
 	@echo "  image-push    build and push to registry"
-	@echo "  watch         start the orchestrator watcher"
+	@echo "  watch         start the orchestrator watcher, or attach to its live log if already running"
 	@echo "  pretrain      run the pretrain bootstrap (stop watcher first)"
 	@echo "  status        summarize live market / agents / review queue"
 	@echo "  trace         show per-task timeline (TASK=task-001)"
@@ -25,7 +25,7 @@ image-push:
 
 watch:
 	@docker image inspect $(IMAGE_TAG) >/dev/null 2>&1 || $(MAKE) image
-	bun orchestrator/watch.ts
+	bun orchestrator/watch-live.ts
 
 pretrain:
 	@docker image inspect $(IMAGE_TAG) >/dev/null 2>&1 || $(MAKE) image

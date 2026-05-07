@@ -19,11 +19,12 @@ import { readdir, stat as fsStat, mkdir, rename, symlink, lstat, rm, unlink } fr
 import { existsSync, watch } from "node:fs";
 import {
   loadLedger, saveLedger, initAgent, debit, syncBalances, aliveAgents,
-  extractUsage, recordWakeup, recordEvent, flushPendingSummaries,
+  recordWakeup, recordEvent, flushPendingSummaries,
   type AgentUsage, type Ledger,
 } from "./ledger";
 import { resolveAuctions } from "./exchange";
 import { processReviewRequests } from "./reviewer";
+import { reopenUnsolvableAssignments } from "./reopen";
 import { TaskSchema, BidSchema, AssignmentSchema, ReviewRequestSchema, ReviewResponseSchema } from "./schemas";
 import { startRpcServer } from "./rpc/server";
 import { spawnAgent, ensureAgentNetwork } from "./spawnAgent";
@@ -32,6 +33,7 @@ import { writeAgentConfig } from "./proxy/agentConfig";
 import { startGateway, stopGateway } from "./gateway";
 import { generateTokens, REVIEWER_PRINCIPAL, type TokenMap } from "./auth";
 import { dim, gray, cyan, magenta, brightMagenta, yellow, brightYellow, red, brightRed, green, brightGreen, bold, blue } from "./log";
+import { renderMarkdownTables } from "./markdown";
 
 const AGENTS_DIR = process.env.AGENTS_DIR ?? "./agents";
 const MARKET = process.env.MARKET_DIR ?? "./market";
@@ -177,7 +179,13 @@ async function loadLatestVerdict(taskId: string, agent: string): Promise<{ seq: 
   return latest;
 }
 
-async function buildWakePrompt(agent: string): Promise<string> {
+interface WakePlan {
+  prompt: string;
+  tools: string[];
+  kind: "bid" | "work";
+}
+
+async function buildWakePlan(agent: string): Promise<WakePlan> {
   const now = new Date();
   const openIds: string[] = [];
   for (const f of await listJsonFiles(`${MARKET}/tasks`)) {
@@ -194,35 +202,49 @@ async function buildWakePrompt(agent: string): Promise<string> {
 
   const lines: string[] = [];
   lines.push(`Wakeup at ${now.toISOString()} (UTC). You are ${agent}.`);
-  lines.push(`Open auctions: ${openIds.length ? openIds.join(", ") : "none"}.`);
-  lines.push(`Assigned to you: ${assignedIds.length ? assignedIds.join(", ") : "none"}.`);
-  for (const id of assignedIds) {
-    const v = await loadLatestVerdict(id, agent);
+
+  if (assignedIds.length > 0) {
+    const focus = assignedIds[0];
+    lines.push(`Wake type: WORK. Focus only on assigned task ${focus}.`);
+    lines.push(`Other assigned tasks: ${assignedIds.slice(1).join(", ") || "none"}.`);
+    lines.push("Do not inspect open auctions and do not bid during a work wake. Finish or advance the focused assignment, request review when ready, then stop.");
+    const v = await loadLatestVerdict(focus, agent);
     if (!v) {
-      lines.push(`  ${id}: no review yet — do the work and call request_review when ready.`);
-      continue;
-    }
-    if (v.verdict === "needs_work") {
-      lines.push(`  ${id}: review #${v.seq} → NEEDS WORK. Feedback:`);
-      for (const fl of v.feedback.split("\n")) lines.push(`    ${fl}`);
+      lines.push(`${focus}: no review yet — do the work and call request_review when ready.`);
+    } else if (v.verdict === "needs_work") {
+      lines.push(`${focus}: review #${v.seq} → NEEDS WORK. Feedback:`);
+      for (const fl of v.feedback.split("\n")) lines.push(`  ${fl}`);
     } else {
-      lines.push(`  ${id}: review #${v.seq} → ${v.verdict}.`);
+      lines.push(`${focus}: review #${v.seq} → ${v.verdict}.`);
     }
+    lines.push("");
+    lines.push("Enabled tools this wake:");
+    lines.push("  my_assignments, task_info, task_verdicts, request_review, my_balance, history");
+    lines.push("  read, bash, edit, write for implementation work inside your sandbox");
+    lines.push("");
+    lines.push("Cash discipline: your balance is debited after every model turn. If it hits 0 mid-wake, the wake is aborted and you are bankrupt. Keep this work wake short.");
+    return {
+      kind: "work",
+      prompt: lines.join("\n"),
+      tools: ["my_assignments", "task_info", "task_verdicts", "request_review", "my_balance", "history", "read", "bash", "edit", "write"],
+    };
   }
+
+  lines.push("Wake type: BID. You have no active assignment to work on.");
+  lines.push(`Open auctions: ${openIds.length ? openIds.join(", ") : "none"}.`);
+  lines.push("The open-auction list above is only a snapshot. Call list_tasks before bidding; new auctions may have appeared since this wake started.");
   lines.push("");
-  lines.push("Available market tools (call them — narrating them in text does not run them):");
-  lines.push("  list_tasks       — list open auctions");
-  lines.push("  task_info        — full details of a task");
-  lines.push("  my_assignments   — your current assignments");
-  lines.push("  place_bid        — place / update a bid");
-  lines.push("  request_review   — request review of your work");
-  lines.push("  task_verdicts    — your verdicts on a task");
-  lines.push("  my_balance       — your token balance");
-  lines.push("  history          — read your append-only history log");
+  lines.push("Enabled tools this wake:");
+  lines.push("  list_tasks, task_info, place_bid, my_balance, history");
+  lines.push("Implementation tools and review tools are disabled during bid wakes. Do not do task work before assignment.");
   lines.push("");
-  lines.push("Before bidding: call `history` and read EVERY line — both the per-task `cost X, paid Y, net Z` summaries AND every individual `Wakeup cost: N tokens` line. Thinking tokens dominate; the `review_fee` is a small fraction of total cost. Bid NOTICEABLY ABOVE your expected TOTAL cost (this wake + future wakes for the task + review_fee), derived from your own history. Goal: grow balance, not win auctions. A winning bid below your cost loses you money — bankruptcy = game over. If the auction won't clear above your cost, sit it out.");
-  lines.push("Take a few actions then stop; another wakeup will fire when something relevant changes.");
-  return lines.join("\n");
+  lines.push("Before bidding: call `history` and read EVERY line — both per-task summaries and individual `Wakeup cost: N tokens` lines. Thinking tokens dominate. Bid above expected TOTAL cost including losing-auction/search attrition. Goal: grow balance, not win auctions.");
+  lines.push("Cash discipline: your balance is debited after every model turn. If it hits 0 mid-wake, the wake is aborted and you are bankrupt. Place at most a few bids, then stop.");
+  return {
+    kind: "bid",
+    prompt: lines.join("\n"),
+    tools: ["list_tasks", "task_info", "place_bid", "my_balance", "history"],
+  };
 }
 
 function logPrefixed(prefix: string, content: string, color: (s: string) => string = (s) => s): void {
@@ -244,7 +266,7 @@ function handlePiEvent(agent: string, line: string): void {
     if (c.type === "thinking" && c.thinking) {
       logPrefixed(`${agent}/thinks`, c.thinking, gray);
     } else if (c.type === "text" && c.text) {
-      logPrefixed(`${agent}/says`, c.text, cyan);
+      logPrefixed(`${agent}/says`, renderMarkdownTables(c.text), cyan);
     } else if (c.type === "tool_use") {
       logPrefixed(`${agent}/${c.name}`, JSON.stringify(c.input ?? {}), green);
     }
@@ -253,53 +275,94 @@ function handlePiEvent(agent: string, line: string): void {
 
 let wakeCounter = 0;
 
-async function runAgent(agent: string, tokens: TokenMap): Promise<string> {
-  const prompt = await buildWakePrompt(agent);
-  logPrefixed(`${agent}/wake-prompt`, prompt, magenta);
+function usageFromTurnEnd(line: string): AgentUsage | null {
+  try {
+    const ev = JSON.parse(line);
+    if (ev.type !== "turn_end" || !ev.message?.usage) return null;
+    const u = ev.message.usage;
+    return {
+      inputTokens: u.input ?? 0,
+      outputTokens: u.output ?? 0,
+      cacheReadTokens: u.cacheRead ?? 0,
+      totalTokens: u.totalTokens ?? 0,
+      costUsd: u.cost?.total ?? 0,
+    };
+  } catch {
+    return null;
+  }
+}
+
+function addUsage(a: AgentUsage, b: AgentUsage): void {
+  a.inputTokens += b.inputTokens;
+  a.outputTokens += b.outputTokens;
+  a.cacheReadTokens += b.cacheReadTokens;
+  a.totalTokens += b.totalTokens;
+  a.costUsd += b.costUsd;
+}
+
+async function runAgent(agent: string, ledger: Ledger, tokens: TokenMap): Promise<AgentUsage> {
+  const plan = await buildWakePlan(agent);
+  logPrefixed(`${agent}/wake-prompt`, plan.prompt, magenta);
 
   const model = process.env.AGENT_MODEL ?? "openrouter/deepseek/deepseek-v4-flash";
   const token = tokens.byAgent.get(agent);
   if (!token) throw new Error(`no auth token for agent '${agent}'`);
   const proc = spawnAgent({
     agent,
-    prompt,
+    prompt: plan.prompt,
     model,
+    tools: plan.tools,
     authToken: token,
     runTag: `w${++wakeCounter}`,
   });
 
+  const usage: AgentUsage = { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, totalTokens: 0, costUsd: 0 };
   const decoder = new TextDecoder();
   let buffer = "";
-  let captured = "";
+  let abortedForBankruptcy = false;
+
+  const processLine = async (line: string) => {
+    handlePiEvent(agent, line);
+    const turnUsage = usageFromTurnEnd(line);
+    if (!turnUsage || turnUsage.totalTokens <= 0) return;
+    addUsage(usage, turnUsage);
+    const at = new Date();
+    debit(ledger, agent, turnUsage.totalTokens, `Wakeup turn: ${turnUsage.totalTokens}tok ($${turnUsage.costUsd.toFixed(4)})`, at);
+    console.log(dim(`    ${agent}: -${turnUsage.totalTokens.toLocaleString()} turn tokens ($${turnUsage.costUsd.toFixed(4)}), balance ${(ledger[agent]?.balance ?? 0).toLocaleString()}`));
+    await saveLedger(ledger);
+    await syncBalances(ledger);
+    if ((ledger[agent]?.balance ?? 0) <= 0 && !abortedForBankruptcy) {
+      abortedForBankruptcy = true;
+      console.log(brightRed(`    ${agent}: bankrupt mid-wake; aborting ${plan.kind} wake`));
+      try { proc.kill("SIGTERM"); } catch {}
+    }
+  };
 
   for await (const chunk of proc.stdout as AsyncIterable<Uint8Array>) {
     const text = decoder.decode(chunk, { stream: true });
-    captured += text;
     buffer += text;
     let idx: number;
     while ((idx = buffer.indexOf("\n")) >= 0) {
-      handlePiEvent(agent, buffer.slice(0, idx));
+      await processLine(buffer.slice(0, idx));
       buffer = buffer.slice(idx + 1);
     }
   }
-  if (buffer.length) handlePiEvent(agent, buffer);
+  if (buffer.length) await processLine(buffer);
 
   const stderr = await new Response(proc.stderr).text();
   const exitCode = await proc.exited;
-  if (exitCode !== 0) {
+  if (exitCode !== 0 && !abortedForBankruptcy) {
     console.error(red(`  [${agent}] exit ${exitCode}: ${stderr.slice(0, 200)}`));
   }
-  return captured;
+  return usage;
 }
 
 async function wakeAgent(agent: string, ledger: Ledger, tokens: TokenMap): Promise<void> {
   const at = new Date();
   console.log(brightMagenta(`  → waking ${agent} at ${at.toISOString().slice(11, 19)}`));
-  const output = await runAgent(agent, tokens);
-  const usage = extractUsage(output);
+  const usage = await runAgent(agent, ledger, tokens);
   if (usage.totalTokens > 0) {
-    debit(ledger, agent, usage.totalTokens, `Wakeup: ${usage.totalTokens}tok ($${usage.costUsd.toFixed(4)})`, at);
-    console.log(dim(`    ${agent}: -${usage.totalTokens.toLocaleString()} tokens ($${usage.costUsd.toFixed(4)})`));
+    console.log(dim(`    ${agent}: wake total -${usage.totalTokens.toLocaleString()} tokens ($${usage.costUsd.toFixed(4)})`));
   }
   const ctx = await gatherWakeupContext(agent, at);
   await recordWakeup(agent, at, usage, ctx);
@@ -436,6 +499,19 @@ async function main() {
     } catch (e) {
       console.error("resolveAuctions error:", e);
     }
+
+    try {
+      const r = await reopenUnsolvableAssignments(ledger);
+      if (r.reopened.length > 0) {
+        console.log(brightYellow(`Reopened bankrupt assignment(s): ${r.reopened.join(", ")}`));
+        for (const a of aliveAgents(ledger).filter((n) => agentNames.includes(n))) {
+          triggerWake(a, false);
+        }
+      }
+    } catch (e) {
+      console.error("reopenUnsolvableAssignments error:", e);
+    }
+
     await persist();
   };
 
@@ -539,15 +615,21 @@ async function main() {
   }
   console.log(green("Watchers attached."));
 
-  // Replay existing actionable state as events (no unconditional wake).
-  // - Open auctions wake all agents (refresh; running wake's tools cover it).
+  // Replay existing actionable state as events.
   // - Active assignments wake their winner (must react, queue if running).
-  let anyOpen = false;
+  // - Existing open auctions only wake everyone if at least one has no bids.
+  //   This makes watcher restarts cheap: a restart should not re-trigger a
+  //   whole-market bidding wake when agents already saw and bid on the opens.
+  const bidFiles = await listJsonFiles(`${MARKET}/bids`);
+  let anyUnbidOpen = false;
   for (const f of await listJsonFiles(`${MARKET}/tasks`)) {
     const t = await readJsonOrNull(`${MARKET}/tasks/${f}`, TaskSchema);
-    if (t && t.status === "open") { anyOpen = true; break; }
+    if (t && t.status === "open" && !bidFiles.some((b) => b.startsWith(`${t.id}-`))) {
+      anyUnbidOpen = true;
+      break;
+    }
   }
-  if (anyOpen) {
+  if (anyUnbidOpen) {
     for (const a of aliveAgents(ledger).filter((n) => agentNames.includes(n))) {
       triggerWake(a, false);
     }

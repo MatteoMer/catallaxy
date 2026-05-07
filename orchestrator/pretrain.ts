@@ -27,7 +27,7 @@
  * new task/assignment files and debit review fees.
  *
  * Usage:
- *   bun orchestrator/pretrain.ts [--n 2] [--max-iters 3]
+ *   bun orchestrator/pretrain.ts [--n 2] [--max-iters 3] [agent ...]
  */
 
 import { existsSync } from "node:fs";
@@ -106,21 +106,27 @@ const TEMPLATES: Template[] = [
   },
 ];
 
-function parseArgs(argv: string[]): { n: number; maxIters: number } {
+function parseArgs(argv: string[]): { n: number; maxIters: number; agents: string[] } {
   let n = 2;
   let maxIters = 3;
+  const agents: string[] = [];
   for (let i = 0; i < argv.length; i++) {
     if (argv[i] === "--n") n = parseInt(argv[++i], 10);
     else if (argv[i] === "--max-iters") maxIters = parseInt(argv[++i], 10);
     else if (argv[i] === "-h" || argv[i] === "--help") {
-      console.log(`Usage: bun orchestrator/pretrain.ts [--n 2] [--max-iters 3]
+      console.log(`Usage: bun orchestrator/pretrain.ts [--n 2] [--max-iters 3] [agent ...]
 
   --n N           number of dry-run tasks per agent (default 2)
-  --max-iters M   max wake/review iterations per task (default 3)`);
+  --max-iters M   max wake/review iterations per task (default 3)
+  agent ...       optional agent names to pretrain (default: all agents)`);
       process.exit(0);
+    } else if (argv[i].startsWith("-")) {
+      throw new Error(`unknown option: ${argv[i]}`);
+    } else {
+      agents.push(argv[i]);
     }
   }
-  return { n, maxIters };
+  return { n, maxIters, agents };
 }
 
 function logPrefixed(prefix: string, content: string, color: (s: string) => string = (s) => s): void {
@@ -264,20 +270,11 @@ async function runPi(agent: string, prompt: string, tokens: TokenMap): Promise<{
     runTag: `pt${++pretrainWakeCounter}`,
   });
 
-  const decoder = new TextDecoder();
-  let buffer = "";
-  let captured = "";
-  for await (const chunk of proc.stdout as AsyncIterable<Uint8Array>) {
-    const text = decoder.decode(chunk, { stream: true });
-    captured += text;
-    buffer += text;
-    let idx: number;
-    while ((idx = buffer.indexOf("\n")) >= 0) {
-      handlePiEvent(agent, buffer.slice(0, idx));
-      buffer = buffer.slice(idx + 1);
-    }
-  }
-  if (buffer.length) handlePiEvent(agent, buffer);
+  // Avoid streaming stdout here. Bun 1.2.6 occasionally segfaults while
+  // iterating long docker stdout streams from pi JSON mode; reading the pipe
+  // as a single Response after process exit has been stable in reviewer paths.
+  const captured = await new Response(proc.stdout).text();
+  for (const line of captured.split("\n")) handlePiEvent(agent, line);
 
   const stderr = await new Response(proc.stderr).text();
   const code = await proc.exited;
@@ -543,7 +540,7 @@ async function pretrainOne(
 }
 
 async function main(): Promise<void> {
-  const { n, maxIters } = parseArgs(process.argv.slice(2));
+  const { n, maxIters, agents: requestedAgents } = parseArgs(process.argv.slice(2));
 
   if (await isWatcherRunning()) {
     console.error(red("Watcher is running. Stop it before pretraining (otherwise it will debit balances and double-handle reviews)."));
@@ -553,7 +550,13 @@ async function main(): Promise<void> {
   console.log(bold(`Pretrain: ${n} task(s) per agent, max ${maxIters} iter(s) per task`));
   await ensureMarketDirs();
 
-  const agents = await discoverAgents();
+  const discoveredAgents = await discoverAgents();
+  const agents = requestedAgents.length ? requestedAgents : discoveredAgents;
+  const missing = agents.filter((a) => !discoveredAgents.includes(a));
+  if (missing.length) {
+    console.error(red(`Unknown agent(s): ${missing.join(", ")}`));
+    process.exit(1);
+  }
   console.log(cyan(`Agents: ${agents.join(", ")}`));
 
   const ledger = await loadLedger();

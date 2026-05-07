@@ -71,6 +71,12 @@ describe("spawnAgent argument construction", () => {
     expect(piArgs).toContain("--mode");
   });
 
+  test("pi args can restrict tool allowlist per wake", () => {
+    const piArgs = buildPiArgs({ ...opts, tools: ["history", "place_bid"] });
+    expect(piArgs).toContain("--tools");
+    expect(piArgs[piArgs.indexOf("--tools") + 1]).toBe("history,place_bid");
+  });
+
   test("container name encodes agent + run tag", () => {
     const args = buildDockerArgs(opts, buildPiArgs(opts));
     const nameIdx = args.indexOf("--name");

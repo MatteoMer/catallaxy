@@ -7,7 +7,7 @@
 
 import { readdir } from "node:fs/promises";
 import { TaskSchema, BidSchema, type Task } from "./schemas";
-import { recordEvent } from "./ledger";
+import { loadLedger, recordEvent } from "./ledger";
 import { prepareWorkDir } from "./workdir";
 import { dim, red, brightGreen, brightYellow } from "./log";
 
@@ -54,6 +54,7 @@ export async function resolveAuctions(now: Date = new Date()): Promise<{ assigne
   const tasks = await readAllInDir(`${MARKET}/tasks`, TaskSchema);
   const bids = await readAllInDir(`${MARKET}/bids`, BidSchema);
   const reservations = await loadReservations();
+  const ledger = await loadLedger();
 
   let assigned = 0;
   let expired = 0;
@@ -70,7 +71,7 @@ export async function resolveAuctions(now: Date = new Date()): Promise<{ assigne
 
     const taskBids = bids.filter((b) => b.task_id === task.id);
     const validBids = taskBids
-      .filter((b) => b.price <= reservation)
+      .filter((b) => b.price <= reservation && (ledger[b.agent]?.balance ?? 0) > 0)
       .sort((a, b) => a.price - b.price);
 
     if (validBids.length === 0) {
@@ -82,8 +83,11 @@ export async function resolveAuctions(now: Date = new Date()): Promise<{ assigne
       console.log(
         red(`  ${task.id}: EXPIRED — ${taskBids.length} bid(s), none ≤ reservation ${reservation}`)
       );
+      const brief = task.description.replace(/\s+/g, " ").slice(0, 180);
       for (const b of taskBids) {
-        await recordEvent(b.agent, now, `task ${task.id} expired — your bid ${b.price} above reservation, no payment`);
+        const alive = (ledger[b.agent]?.balance ?? 0) > 0;
+        const reason = alive ? `your bid ${b.price} above reservation` : `your bid ignored because you are bankrupt`;
+        await recordEvent(b.agent, now, `task ${task.id} expired — ${reason}, no payment — ${brief}`);
       }
       expired++;
       continue;
@@ -125,10 +129,11 @@ export async function resolveAuctions(now: Date = new Date()): Promise<{ assigne
       brightGreen(`  ${task.id}: ${winner.agent} wins (paid ${payment}, reserve ${reservation}, ${validBids.length} valid bid(s))`)
     );
 
-    await recordEvent(winner.agent, now, `won task ${task.id} at ${payment} (${validBids.length} valid bids)`);
+    const brief = task.description.replace(/\s+/g, " ").slice(0, 180);
+    await recordEvent(winner.agent, now, `won task ${task.id} at ${payment} (${validBids.length} valid bids) — ${brief}`);
     for (const b of taskBids) {
       if (b.agent === winner.agent) continue;
-      await recordEvent(b.agent, now, `lost task ${task.id} to ${winner.agent} at ${payment} (your bid: ${b.price})`);
+      await recordEvent(b.agent, now, `lost task ${task.id} to ${winner.agent} at ${payment} (your bid: ${b.price}) — ${brief}`);
     }
     assigned++;
   }

@@ -4,7 +4,8 @@
  * Removes:
  *   - market/{tasks,bids,assignments,review_requests,review_responses}
  *   - agents/{name}/{memory,work,balance.json}
- *   - orchestrator/{ledger.json,private/}
+ *   - orchestrator/{ledger.json,private/} (history, audit logs, campaign/reopen state)
+ *   - running watcher/campaign/reopen processes and agent containers
  *   - playground branches other than main, untracked files inside the repo
  *
  * Preserves: code, SYSTEM.md, agents/{name}/identity.json, agent template.
@@ -16,6 +17,7 @@ const ROOT = process.cwd();
 const AGENTS_DIR = `${ROOT}/agents`;
 const MARKET = `${ROOT}/market`;
 const PLAYGROUND = `${ROOT}/repos/playground`;
+const PLAYGROUND_INIT_REF = process.env.PLAYGROUND_RESET_REF ?? "2892fa2";
 
 async function rmrf(path: string): Promise<void> {
   await rm(path, { recursive: true, force: true });
@@ -43,23 +45,32 @@ async function git(args: string[]): Promise<{ stdout: string; code: number }> {
 }
 
 /**
- * Kill any running `bun orchestrator/watch.ts` processes before wiping
- * state. Otherwise their in-memory ledger gets saved back to disk on
- * the next tick and quietly undoes the reset.
+ * Kill any running orchestrator loops before wiping state. Otherwise their
+ * in-memory state can get saved back to disk on the next tick and quietly
+ * undo the reset.
  */
-async function killRunningWatchers(): Promise<void> {
-  const proc = Bun.spawn(["pgrep", "-f", "bun orchestrator/watch.ts"], {
-    stdout: "pipe",
-    stderr: "pipe",
-  });
-  const stdout = await new Response(proc.stdout).text();
-  await proc.exited;
-  const pids = stdout
-    .split("\n")
-    .map((s) => parseInt(s.trim(), 10))
-    .filter((n) => Number.isInteger(n) && n !== process.pid);
-  if (pids.length === 0) return;
-  console.log(`  killing running watcher(s): ${pids.join(", ")}`);
+async function killRunningOrchestrators(): Promise<void> {
+  const patterns = [
+    "bun orchestrator/watch.ts",
+    "bun orchestrator/watch-live.ts",
+    "bun orchestrator/campaign.ts",
+    "bun orchestrator/reopen.ts",
+  ];
+  const pids = new Set<number>();
+  for (const pattern of patterns) {
+    const proc = Bun.spawn(["pgrep", "-f", pattern], {
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    const stdout = await new Response(proc.stdout).text();
+    await proc.exited;
+    for (const line of stdout.split("\n")) {
+      const pid = parseInt(line.trim(), 10);
+      if (Number.isInteger(pid) && pid !== process.pid) pids.add(pid);
+    }
+  }
+  if (pids.size === 0) return;
+  console.log(`  killing running orchestrator process(es): ${[...pids].join(", ")}`);
   for (const pid of pids) {
     try { process.kill(pid, "SIGTERM"); } catch {}
   }
@@ -139,12 +150,14 @@ async function resetPlayground(): Promise<void> {
   for (const b of branches) {
     await git(["branch", "-D", b]);
   }
-  await git(["reset", "--hard"]);
+  // Reset to the playground's initial seed commit by default. Override with
+  // PLAYGROUND_RESET_REF=<commit/tag> if a different baseline is needed.
+  await git(["reset", "--hard", PLAYGROUND_INIT_REF]);
   await git(["clean", "-fd"]);
 }
 
 console.log("Resetting catallaxy state...");
-await killRunningWatchers();
+await killRunningOrchestrators();
 await resetMarket();
 console.log("  market/ wiped");
 await resetAgents();
@@ -154,5 +167,5 @@ console.log("  ledger and reservations wiped");
 await resetDocker();
 console.log("  agent containers + bridge network cleaned");
 await resetPlayground();
-console.log("  playground reset to main");
+console.log(`  playground reset to ${PLAYGROUND_INIT_REF}`);
 console.log("Done.");
