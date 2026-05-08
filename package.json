@@ -9,12 +9,13 @@
     "ledger": "bun orchestrator/ledger.ts",
     "status": "bun orchestrator/status.ts",
     "trace": "bun orchestrator/trace.ts",
+    "pause": "bun orchestrator/pause.ts",
     "create-agent": "bun orchestrator/create-agent.ts",
     "create-task": "bun orchestrator/create-task.ts",
     "pretrain": "make image-if-needed && bun orchestrator/pretrain.ts",
     "reset": "bun orchestrator/reset.ts",
     "image": "docker/build.sh",
-    "test": "bun test tests/auth.test.ts tests/rpc.test.ts tests/proxy.test.ts tests/spawn.test.ts tests/lgtm.test.ts tests/markdown.test.ts tests/ledger.test.ts"
+    "test": "bun test tests/auth.test.ts tests/rpc.test.ts tests/proxy.test.ts tests/spawn.test.ts tests/lgtm.test.ts tests/markdown.test.ts tests/ledger.test.ts tests/pause.test.ts"
   },
   "dependencies": {
     "zod": "^3.24.0"
