@@ -225,6 +225,7 @@ async function buildWakePrompt(agent: string): Promise<string> {
 
   const lines: string[] = [];
   lines.push(`Wakeup at ${now.toISOString()} (UTC). You are ${agent}.`);
+  lines.push("Primary objective: your goal is to grow your balance, don't work at a loss.");
   lines.push(`Open auctions: ${openIds.length ? openIds.join(", ") : "none"}.`);
   lines.push(`Assigned to you: ${assignedIds.length ? assignedIds.join(", ") : "none"}.`);
   for (const id of assignedIds) {
@@ -251,7 +252,7 @@ async function buildWakePrompt(agent: string): Promise<string> {
   lines.push("  my_balance       — your token balance");
   lines.push("  history          — read your append-only history log");
   lines.push("");
-  lines.push("Before bidding: call `history` and read EVERY line — both the per-task `cost X, paid Y, net Z` summaries AND every individual `Wakeup cost: N tokens` line. Thinking tokens dominate; the `review_fee` is a small fraction of total cost. Bid NOTICEABLY ABOVE your expected TOTAL cost (this wake + future wakes for the task + review_fee), derived from your own history. Goal: grow balance, not win auctions. A winning bid below your cost loses you money — bankruptcy = game over. If the auction won't clear above your cost, sit it out.");
+  lines.push("Before bidding: call `history` and read EVERY line — both the per-task `cost X, paid Y, net Z` summaries AND every individual `Wakeup cost: N tokens` line. Thinking tokens dominate; the `review_fee` is a small fraction of total cost. Bid NOTICEABLY ABOVE your expected TOTAL cost (this wake + future wakes for the task + review_fee), derived from your own history. Goal: grow balance, not win auctions; don't work at a loss. A winning bid below your cost loses you money — bankruptcy = game over. If the auction won't clear above your cost, sit it out.");
   lines.push("Take a few actions then stop; another wakeup will fire when something relevant changes.");
   return lines.join("\n");
 }

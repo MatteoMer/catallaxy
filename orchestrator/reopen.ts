@@ -11,6 +11,7 @@
 import { readdir, rm } from "node:fs/promises";
 import { AssignmentSchema, BidSchema, TaskSchema, type Task, type Ledger } from "./schemas";
 import { loadLedger, recordEvent } from "./ledger";
+import { logEvent } from "./events";
 
 const MARKET = process.env.MARKET_DIR ?? "./market";
 const REOPEN_DEADLINE_MS = Number(process.env.REOPEN_DEADLINE_MS ?? String(5 * 60_000));
@@ -87,6 +88,15 @@ async function reopenTask(task: Task, winner: string, now: Date): Promise<void> 
     now,
     `task ${task.id} reopened — assignment winner bankrupt before completion; old bids cleared`
   );
+  await logEvent({
+    type: "assignment_reopened",
+    at: now.toISOString(),
+    task_id: task.id,
+    agent: winner,
+    reason: "winner_bankrupt",
+    old_deadline_at: task.deadline_at,
+    new_deadline_at: newDeadline.toISOString(),
+  });
 }
 
 async function runOnce(): Promise<void> {

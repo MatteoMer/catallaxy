@@ -34,6 +34,7 @@ import { startGateway, stopGateway } from "./gateway";
 import { generateTokens, REVIEWER_PRINCIPAL, type TokenMap } from "./auth";
 import { dim, gray, cyan, magenta, brightMagenta, yellow, brightYellow, red, brightRed, green, brightGreen, bold, blue } from "./log";
 import { renderMarkdownTables } from "./markdown";
+import { logEvent } from "./events";
 
 const AGENTS_DIR = process.env.AGENTS_DIR ?? "./agents";
 const MARKET = process.env.MARKET_DIR ?? "./market";
@@ -183,6 +184,7 @@ interface WakePlan {
   prompt: string;
   tools: string[];
   kind: "bid" | "work";
+  taskId?: string;
 }
 
 async function buildWakePlan(agent: string): Promise<WakePlan> {
@@ -202,6 +204,7 @@ async function buildWakePlan(agent: string): Promise<WakePlan> {
 
   const lines: string[] = [];
   lines.push(`Wakeup at ${now.toISOString()} (UTC). You are ${agent}.`);
+  lines.push("Primary objective: your goal is to grow your balance, don't work at a loss.");
 
   if (assignedIds.length > 0) {
     const focus = assignedIds[0];
@@ -222,9 +225,10 @@ async function buildWakePlan(agent: string): Promise<WakePlan> {
     lines.push("  my_assignments, task_info, task_verdicts, request_review, my_balance, history");
     lines.push("  read, bash, edit, write for implementation work inside your sandbox");
     lines.push("");
-    lines.push("Cash discipline: your balance is debited after every model turn. If it hits 0 mid-wake, the wake is aborted and you are bankrupt. Keep this work wake short.");
+    lines.push("Cash discipline: your balance is debited after every model turn. If it hits 0 mid-wake, the wake is aborted and you are bankrupt. Keep this work wake short; don't keep spending into a negative-net assignment.");
     return {
       kind: "work",
+      taskId: focus,
       prompt: lines.join("\n"),
       tools: ["my_assignments", "task_info", "task_verdicts", "request_review", "my_balance", "history", "read", "bash", "edit", "write"],
     };
@@ -238,7 +242,7 @@ async function buildWakePlan(agent: string): Promise<WakePlan> {
   lines.push("  list_tasks, task_info, place_bid, my_balance, history");
   lines.push("Implementation tools and review tools are disabled during bid wakes. Do not do task work before assignment.");
   lines.push("");
-  lines.push("Before bidding: call `history` and read EVERY line — both per-task summaries and individual `Wakeup cost: N tokens` lines. Thinking tokens dominate. Bid above expected TOTAL cost including losing-auction/search attrition. Goal: grow balance, not win auctions.");
+  lines.push("Before bidding: call `history` and read EVERY line — both per-task summaries and individual `Wakeup cost: N tokens` lines. Thinking tokens dominate. Bid above expected TOTAL cost including losing-auction/search attrition. Goal: grow balance, not win auctions; don't work at a loss.");
   lines.push("Cash discipline: your balance is debited after every model turn. If it hits 0 mid-wake, the wake is aborted and you are bankrupt. Place at most a few bids, then stop.");
   return {
     kind: "bid",
@@ -300,11 +304,41 @@ function addUsage(a: AgentUsage, b: AgentUsage): void {
   a.costUsd += b.costUsd;
 }
 
-async function runAgent(agent: string, ledger: Ledger, tokens: TokenMap): Promise<AgentUsage> {
+interface BankruptcyInfo {
+  at: Date;
+  wakeId?: string;
+  kind?: "bid" | "work";
+  taskId?: string;
+  source: "turn_debit" | "check";
+  balanceBefore?: number;
+  balanceAfter: number;
+  debitTokens?: number;
+  debitCostUsd?: number;
+}
+
+type BankruptcyRecorder = (agent: string, info: BankruptcyInfo) => Promise<void>;
+
+async function runAgent(
+  agent: string,
+  ledger: Ledger,
+  tokens: TokenMap,
+  recordBankruptcy?: BankruptcyRecorder
+): Promise<AgentUsage> {
   const plan = await buildWakePlan(agent);
   logPrefixed(`${agent}/wake-prompt`, plan.prompt, magenta);
 
+  const wakeId = `w${++wakeCounter}`;
   const model = process.env.AGENT_MODEL ?? "openrouter/deepseek/deepseek-v4-flash";
+  await logEvent({
+    type: "wake_start",
+    agent,
+    wake_id: wakeId,
+    kind: plan.kind,
+    task_id: plan.taskId,
+    model,
+    tools: plan.tools,
+  });
+
   const token = tokens.byAgent.get(agent);
   if (!token) throw new Error(`no auth token for agent '${agent}'`);
   const proc = spawnAgent({
@@ -313,7 +347,7 @@ async function runAgent(agent: string, ledger: Ledger, tokens: TokenMap): Promis
     model,
     tools: plan.tools,
     authToken: token,
-    runTag: `w${++wakeCounter}`,
+    runTag: wakeId,
   });
 
   const usage: AgentUsage = { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, totalTokens: 0, costUsd: 0 };
@@ -327,12 +361,40 @@ async function runAgent(agent: string, ledger: Ledger, tokens: TokenMap): Promis
     if (!turnUsage || turnUsage.totalTokens <= 0) return;
     addUsage(usage, turnUsage);
     const at = new Date();
+    const balanceBefore = ledger[agent]?.balance ?? 0;
     debit(ledger, agent, turnUsage.totalTokens, `Wakeup turn: ${turnUsage.totalTokens}tok ($${turnUsage.costUsd.toFixed(4)})`, at);
-    console.log(dim(`    ${agent}: -${turnUsage.totalTokens.toLocaleString()} turn tokens ($${turnUsage.costUsd.toFixed(4)}), balance ${(ledger[agent]?.balance ?? 0).toLocaleString()}`));
+    const balanceAfter = ledger[agent]?.balance ?? 0;
+    console.log(dim(`    ${agent}: -${turnUsage.totalTokens.toLocaleString()} turn tokens ($${turnUsage.costUsd.toFixed(4)}), balance ${balanceAfter.toLocaleString()}`));
+    await logEvent({
+      type: "turn_debit",
+      at: at.toISOString(),
+      agent,
+      wake_id: wakeId,
+      kind: plan.kind,
+      task_id: plan.taskId,
+      tokens: turnUsage.totalTokens,
+      input_tokens: turnUsage.inputTokens,
+      output_tokens: turnUsage.outputTokens,
+      cache_read_tokens: turnUsage.cacheReadTokens,
+      cost_usd: turnUsage.costUsd,
+      balance_before: balanceBefore,
+      balance_after: balanceAfter,
+    });
     await saveLedger(ledger);
     await syncBalances(ledger);
-    if ((ledger[agent]?.balance ?? 0) <= 0 && !abortedForBankruptcy) {
+    if (balanceAfter <= 0 && !abortedForBankruptcy) {
       abortedForBankruptcy = true;
+      await recordBankruptcy?.(agent, {
+        at,
+        wakeId,
+        kind: plan.kind,
+        taskId: plan.taskId,
+        source: "turn_debit",
+        balanceBefore,
+        balanceAfter,
+        debitTokens: turnUsage.totalTokens,
+        debitCostUsd: turnUsage.costUsd,
+      });
       console.log(brightRed(`    ${agent}: bankrupt mid-wake; aborting ${plan.kind} wake`));
       try { proc.kill("SIGTERM"); } catch {}
     }
@@ -351,16 +413,31 @@ async function runAgent(agent: string, ledger: Ledger, tokens: TokenMap): Promis
 
   const stderr = await new Response(proc.stderr).text();
   const exitCode = await proc.exited;
+  await logEvent({
+    type: "wake_end",
+    agent,
+    wake_id: wakeId,
+    kind: plan.kind,
+    task_id: plan.taskId,
+    status: abortedForBankruptcy ? "bankrupt" : exitCode === 0 ? "ok" : "error",
+    exit_code: exitCode,
+    total_tokens: usage.totalTokens,
+    input_tokens: usage.inputTokens,
+    output_tokens: usage.outputTokens,
+    cache_read_tokens: usage.cacheReadTokens,
+    cost_usd: usage.costUsd,
+    balance_after: ledger[agent]?.balance ?? null,
+  });
   if (exitCode !== 0 && !abortedForBankruptcy) {
     console.error(red(`  [${agent}] exit ${exitCode}: ${stderr.slice(0, 200)}`));
   }
   return usage;
 }
 
-async function wakeAgent(agent: string, ledger: Ledger, tokens: TokenMap): Promise<void> {
+async function wakeAgent(agent: string, ledger: Ledger, tokens: TokenMap, recordBankruptcy?: BankruptcyRecorder): Promise<void> {
   const at = new Date();
   console.log(brightMagenta(`  → waking ${agent} at ${at.toISOString().slice(11, 19)}`));
-  const usage = await runAgent(agent, ledger, tokens);
+  const usage = await runAgent(agent, ledger, tokens, recordBankruptcy);
   if (usage.totalTokens > 0) {
     console.log(dim(`    ${agent}: wake total -${usage.totalTokens.toLocaleString()} tokens ($${usage.costUsd.toFixed(4)})`));
   }
@@ -376,6 +453,12 @@ async function main() {
 
   const agentNames = await discoverAgents();
   console.log(cyan(`Agents: ${agentNames.join(", ")}`));
+  await logEvent({
+    type: "watcher_start",
+    min_wake_interval_ms: MIN_WAKE_INTERVAL_MS,
+    reconcile_ms: RECONCILE_MS,
+    agents: agentNames,
+  });
 
   for (const a of agentNames) await ensureSandbox(a);
 
@@ -437,10 +520,39 @@ async function main() {
     await syncBalances(ledger);
   };
 
+  // Agents that are already dead at watcher startup should not get a fresh
+  // BANKRUPT history entry every reconcile tick. New crossings are recorded
+  // once via recordBankruptcyOnce below.
+  const bankruptRecorded = new Set(agentNames.filter((agent) => (ledger[agent]?.balance ?? 0) <= 0));
+
+  const recordBankruptcyOnce: BankruptcyRecorder = async (agent, info) => {
+    if (bankruptRecorded.has(agent)) return;
+    bankruptRecorded.add(agent);
+    await logEvent({
+      type: "bankrupt",
+      at: info.at.toISOString(),
+      agent,
+      wake_id: info.wakeId,
+      kind: info.kind,
+      task_id: info.taskId,
+      source: info.source,
+      balance_before: info.balanceBefore,
+      balance_after: info.balanceAfter,
+      debit_tokens: info.debitTokens,
+      debit_cost_usd: info.debitCostUsd,
+      last_ledger_entries: ledger[agent]?.history.slice(-8) ?? [],
+    });
+    await recordEvent(agent, info.at, "BANKRUPT — balance hit 0");
+  };
+
   const checkBankrupt = async () => {
     for (const agent of agentNames) {
       const bal = ledger[agent]?.balance ?? 0;
-      if (bal <= 0) await recordEvent(agent, new Date(), "BANKRUPT — balance hit 0");
+      if (bal <= 0) await recordBankruptcyOnce(agent, {
+        at: new Date(),
+        source: "check",
+        balanceAfter: bal,
+      });
     }
   };
 
@@ -477,7 +589,7 @@ async function main() {
 
     wakeStatus.set(agent, "running");
     try {
-      await wakeAgent(agent, ledger, tokens);
+      await wakeAgent(agent, ledger, tokens, recordBankruptcyOnce);
       lastWoken.set(agent, Date.now());
       await persist();
       await checkBankrupt();
