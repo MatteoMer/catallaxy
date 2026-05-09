@@ -40,6 +40,7 @@ const AGENTS_DIR = process.env.AGENTS_DIR ?? "./agents";
 const MARKET = process.env.MARKET_DIR ?? "./market";
 const MIN_WAKE_INTERVAL_MS = parseInt(process.env.MIN_WAKE_INTERVAL_MS ?? "5000", 10);
 const RECONCILE_MS = parseInt(process.env.RECONCILE_MS ?? "60000", 10);
+const AGENT_WAKE_TIMEOUT_MS = parseInt(process.env.AGENT_WAKE_TIMEOUT_MS ?? String(10 * 60_000), 10);
 
 async function discoverAgents(): Promise<string[]> {
   const entries = await readdir(AGENTS_DIR, { withFileTypes: true });
@@ -354,6 +355,29 @@ async function runAgent(
   const decoder = new TextDecoder();
   let buffer = "";
   let abortedForBankruptcy = false;
+  let timedOut = false;
+  const timeout = AGENT_WAKE_TIMEOUT_MS > 0 ? setTimeout(() => {
+    timedOut = true;
+    console.log(brightRed(`    ${agent}: wake ${wakeId} timed out after ${AGENT_WAKE_TIMEOUT_MS}ms; killing ${plan.kind} wake`));
+    void logEvent({
+      type: "wake_timeout",
+      agent,
+      wake_id: wakeId,
+      kind: plan.kind,
+      task_id: plan.taskId,
+      timeout_ms: AGENT_WAKE_TIMEOUT_MS,
+      balance_after: ledger[agent]?.balance ?? null,
+    });
+    try { proc.kill("SIGTERM"); } catch {}
+    // If this is a docker-backed wake, killing the local `docker run`
+    // process is not always enough to tear down a wedged child command.
+    // Best-effort remove the named container too; direct-spawn runs simply
+    // won't have such a container.
+    void Bun.spawn(["docker", "rm", "-f", `catallaxy-agent-${agent}-${wakeId}`], {
+      stdout: "ignore",
+      stderr: "ignore",
+    }).exited;
+  }, AGENT_WAKE_TIMEOUT_MS) : undefined;
 
   const processLine = async (line: string) => {
     handlePiEvent(agent, line);
@@ -413,13 +437,14 @@ async function runAgent(
 
   const stderr = await new Response(proc.stderr).text();
   const exitCode = await proc.exited;
+  if (timeout) clearTimeout(timeout);
   await logEvent({
     type: "wake_end",
     agent,
     wake_id: wakeId,
     kind: plan.kind,
     task_id: plan.taskId,
-    status: abortedForBankruptcy ? "bankrupt" : exitCode === 0 ? "ok" : "error",
+    status: timedOut ? "timeout" : abortedForBankruptcy ? "bankrupt" : exitCode === 0 ? "ok" : "error",
     exit_code: exitCode,
     total_tokens: usage.totalTokens,
     input_tokens: usage.inputTokens,
@@ -428,7 +453,7 @@ async function runAgent(
     cost_usd: usage.costUsd,
     balance_after: ledger[agent]?.balance ?? null,
   });
-  if (exitCode !== 0 && !abortedForBankruptcy) {
+  if (exitCode !== 0 && !abortedForBankruptcy && !timedOut) {
     console.error(red(`  [${agent}] exit ${exitCode}: ${stderr.slice(0, 200)}`));
   }
   return usage;
@@ -457,6 +482,7 @@ async function main() {
     type: "watcher_start",
     min_wake_interval_ms: MIN_WAKE_INTERVAL_MS,
     reconcile_ms: RECONCILE_MS,
+    agent_wake_timeout_ms: AGENT_WAKE_TIMEOUT_MS,
     agents: agentNames,
   });
 
