@@ -15,7 +15,7 @@
     "pretrain": "make image-if-needed && bun orchestrator/pretrain.ts",
     "reset": "bun orchestrator/reset.ts",
     "image": "docker/build.sh",
-    "test": "bun test tests/auth.test.ts tests/rpc.test.ts tests/proxy.test.ts tests/spawn.test.ts tests/lgtm.test.ts tests/markdown.test.ts tests/ledger.test.ts tests/pause.test.ts"
+    "test": "bun test tests/auth.test.ts tests/exchange.test.ts tests/rpc.test.ts tests/proxy.test.ts tests/spawn.test.ts tests/lgtm.test.ts tests/markdown.test.ts tests/ledger.test.ts tests/pause.test.ts"
   },
   "dependencies": {
     "zod": "^3.24.0"

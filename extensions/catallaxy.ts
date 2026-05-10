@@ -171,7 +171,7 @@ const taskInfoTool = defineTool({
 const placeBidTool = defineTool({
   name: "place_bid",
   label: "Place a bid",
-  description: "Place or update a bid on an open auction. PRICE is the number of tokens you accept to do the work, paid only after LGTM. This tool is the ONLY way to bid — narrating 'I bid X' in text does nothing.",
+  description: "Place or update a bid on an open auction. PRICE is your declared minimum acceptable payment / cost estimate. Reverse Vickrey: lowest valid bidder wins, but payment after LGTM is the second-lowest valid bid, or the private reservation if there is only one valid bid. This tool is the ONLY way to bid — narrating 'I bid X' in text does nothing."
   parameters: Type.Object({
     task_id: Type.String({ description: "The task ID to bid on, e.g. 'task-001'" }),
     price: Type.Integer({ minimum: 1, description: "Bid price in tokens (positive integer)" }),

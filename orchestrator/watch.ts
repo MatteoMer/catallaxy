@@ -243,7 +243,7 @@ async function buildWakePlan(agent: string): Promise<WakePlan> {
   lines.push("  list_tasks, task_info, place_bid, my_balance, history");
   lines.push("Implementation tools and review tools are disabled during bid wakes. Do not do task work before assignment.");
   lines.push("");
-  lines.push("Before bidding: call `history` and read EVERY line — both per-task summaries and individual `Wakeup cost: N tokens` lines. Thinking tokens dominate. Bid above expected TOTAL cost including losing-auction/search attrition. Goal: grow balance, not win auctions; don't work at a loss.");
+  lines.push("Before bidding: call `history` and read EVERY line — both per-task summaries and individual `Wakeup cost: N tokens` lines. Thinking tokens dominate. Reverse Vickrey auction: bid your true expected TOTAL cost plus margin; if you win, payment is second-lowest valid bid or reservation, not necessarily your bid. Underbidding only makes you win bad work. Goal: grow balance, not win auctions; don't work at a loss.");
   lines.push("Cash discipline: your balance is debited after every model turn. If it hits 0 mid-wake, the wake is aborted and you are bankrupt. Place at most a few bids, then stop.");
   return {
     kind: "bid",

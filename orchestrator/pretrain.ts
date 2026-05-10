@@ -55,6 +55,7 @@ import { writeAgentConfig } from "./proxy/agentConfig";
 import { startGateway, stopGateway } from "./gateway";
 import { generateTokens, REVIEWER_PRINCIPAL, type TokenMap } from "./auth";
 import { spawnReviewer } from "./spawnReviewer";
+import { clearingPayment } from "./exchange";
 import { isLgtm } from "./lgtm";
 import {
   bold, brightGreen, brightMagenta, brightRed, cyan, dim, gray,
@@ -66,6 +67,7 @@ const MARKET = `${ROOT}/market`;
 const AGENTS_DIR = `${ROOT}/agents`;
 const PLAYGROUND = `${ROOT}/repos/playground`;
 const EXTENSION = `${ROOT}/extensions/catallaxy.ts`;
+const PRETRAIN_RESERVATION = Number(process.env.PRETRAIN_RESERVATION ?? process.env.CAMPAIGN_RESERVATION ?? "500000");
 
 interface Template {
   module: string;
@@ -252,7 +254,7 @@ async function buildWakePrompt(agent: string): Promise<string> {
   lines.push("  my_balance       — your token balance");
   lines.push("  history          — read your append-only history log");
   lines.push("");
-  lines.push("Before bidding: call `history` and read EVERY line — both the per-task `cost X, paid Y, net Z` summaries AND every individual `Wakeup cost: N tokens` line. Thinking tokens dominate; the `review_fee` is a small fraction of total cost. Bid NOTICEABLY ABOVE your expected TOTAL cost (this wake + future wakes for the task + review_fee), derived from your own history. Goal: grow balance, not win auctions; don't work at a loss. A winning bid below your cost loses you money — bankruptcy = game over. If the auction won't clear above your cost, sit it out.");
+  lines.push("Before bidding: call `history` and read EVERY line — both the per-task `cost X, paid Y, net Z` summaries AND every individual `Wakeup cost: N tokens` line. Thinking tokens dominate; the `review_fee` is a small fraction of total cost. Reverse Vickrey auction: bid your true expected TOTAL cost plus margin (this wake + future wakes for the task + review_fee), derived from your own history; if you win, payment is second-lowest valid bid or reservation, not necessarily your bid. Underbidding only makes you win bad work. Goal: grow balance, not win auctions; don't work at a loss. If the auction won't clear above your cost, sit it out.");
   lines.push("Take a few actions then stop; another wakeup will fire when something relevant changes.");
   return lines.join("\n");
 }
@@ -456,17 +458,18 @@ async function pretrainOne(
   // is ready by the time the agent's next wake fires.
   await prepareWorkDir(agent, openTask);
 
+  const payment = clearingPayment([bid], PRETRAIN_RESERVATION);
   const assignment = {
     task_id: taskId,
     winner: agent,
-    payment: bid.price,
+    payment,
     assigned_at: settleAt.toISOString(),
   };
   await Bun.write(`${MARKET}/assignments/${taskId}.json`, JSON.stringify(assignment, null, 2));
   const assignedTask: Task = { ...openTask, status: "assigned" };
   await Bun.write(`${MARKET}/tasks/${taskId}.json`, JSON.stringify(assignedTask, null, 2));
-  await recordEvent(agent, settleAt, `won task ${taskId} at ${bid.price} (1 valid bids)`);
-  console.log(brightGreen(`  ${taskId}: ${agent} wins (paid ${bid.price})`));
+  await recordEvent(agent, settleAt, `won task ${taskId} at ${payment} (your bid: ${bid.price}; 1 valid bids)`);
+  console.log(brightGreen(`  ${taskId}: ${agent} wins (bid ${bid.price}, paid ${payment})`));
 
   // Phase 2: work wakes + review iterations.
   const taskStartMs = Date.now();

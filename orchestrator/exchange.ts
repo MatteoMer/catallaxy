@@ -6,7 +6,7 @@
  */
 
 import { readdir } from "node:fs/promises";
-import { TaskSchema, BidSchema, type Task } from "./schemas";
+import { TaskSchema, BidSchema, type Task, type Bid } from "./schemas";
 import { loadLedger, recordEvent } from "./ledger";
 import { prepareWorkDir } from "./workdir";
 import { dim, red, brightGreen, brightYellow } from "./log";
@@ -44,6 +44,17 @@ async function readAllInDir<T>(dir: string, schema: { parse: (d: unknown) => T }
     }
   }
   return entries;
+}
+
+/**
+ * Reverse Vickrey clearing price: lowest bidder wins, but is paid the
+ * second-lowest valid bid. If there is only one valid bid, the private
+ * reservation price is the outside option / cap, so the winner is paid it.
+ */
+export function clearingPayment(validBids: Pick<Bid, "price">[], reservation: number): number {
+  if (validBids.length === 0) throw new Error("clearingPayment requires at least one valid bid");
+  const prices = validBids.map((b) => b.price).sort((a, b) => a - b);
+  return Math.min(prices[1] ?? reservation, reservation);
 }
 
 /**
@@ -94,7 +105,7 @@ export async function resolveAuctions(now: Date = new Date()): Promise<{ assigne
     }
 
     const winner = validBids[0];
-    const payment = winner.price;
+    const payment = clearingPayment(validBids, reservation);
 
     // Pre-clone the task repo into the winner's work dir BEFORE we
     // publish the assignment. The watcher's fs.watch on assignments/
@@ -126,14 +137,14 @@ export async function resolveAuctions(now: Date = new Date()): Promise<{ assigne
     );
 
     console.log(
-      brightGreen(`  ${task.id}: ${winner.agent} wins (paid ${payment}, reserve ${reservation}, ${validBids.length} valid bid(s))`)
+      brightGreen(`  ${task.id}: ${winner.agent} wins (bid ${winner.price}, paid ${payment}, reserve ${reservation}, ${validBids.length} valid bid(s))`)
     );
 
     const brief = task.description.replace(/\s+/g, " ").slice(0, 180);
-    await recordEvent(winner.agent, now, `won task ${task.id} at ${payment} (${validBids.length} valid bids) — ${brief}`);
+    await recordEvent(winner.agent, now, `won task ${task.id} at ${payment} (your bid: ${winner.price}; ${validBids.length} valid bids) — ${brief}`);
     for (const b of taskBids) {
       if (b.agent === winner.agent) continue;
-      await recordEvent(b.agent, now, `lost task ${task.id} to ${winner.agent} at ${payment} (your bid: ${b.price}) — ${brief}`);
+      await recordEvent(b.agent, now, `lost task ${task.id} to ${winner.agent} paid ${payment} (your bid: ${b.price}) — ${brief}`);
     }
     assigned++;
   }
