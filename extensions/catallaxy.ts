@@ -23,6 +23,10 @@
 
 import { Type } from "@mariozechner/pi-ai";
 import { defineTool, type ExtensionAPI } from "@mariozechner/pi-coding-agent";
+import { spawn } from "node:child_process";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { connect } from "node:net";
 
 /**
@@ -123,6 +127,241 @@ function rpc(): RpcClient {
   return _client;
 }
 
+interface AgentUsage {
+  inputTokens: number;
+  outputTokens: number;
+  cacheReadTokens: number;
+  totalTokens: number;
+  costUsd: number;
+}
+
+function emptyUsage(): AgentUsage {
+  return { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, totalTokens: 0, costUsd: 0 };
+}
+
+function addUsage(a: AgentUsage, b: AgentUsage): void {
+  a.inputTokens += b.inputTokens;
+  a.outputTokens += b.outputTokens;
+  a.cacheReadTokens += b.cacheReadTokens;
+  a.totalTokens += b.totalTokens;
+  a.costUsd += b.costUsd;
+}
+
+function usageFromTurnEnd(ev: any): AgentUsage | null {
+  if (ev?.type !== "turn_end" || !ev.message?.usage) return null;
+  const u = ev.message.usage;
+  return {
+    inputTokens: u.input ?? 0,
+    outputTokens: u.output ?? 0,
+    cacheReadTokens: u.cacheRead ?? 0,
+    totalTokens: u.totalTokens ?? 0,
+    costUsd: u.cost?.total ?? 0,
+  };
+}
+
+function textFromMessage(message: any): string {
+  const chunks: string[] = [];
+  for (const c of message?.content ?? []) {
+    if (c?.type === "text" && typeof c.text === "string") chunks.push(c.text);
+  }
+  return chunks.join("\n").trim();
+}
+
+function historySummaryPrompt(rawHistory: string): string {
+  return [
+    "You are a terse financial analyst for a token-budgeted coding-auction agent.",
+    "The agent will use your output to decide future bids. Compress the raw append-only history into actionable lessons.",
+    "",
+    "Rules:",
+    "- Do NOT reproduce the raw log.",
+    "- Use only facts present in the history. If data is missing, say so.",
+    "- Keep it compact: target <= 900 words.",
+    "- Emphasize losses, true total costs, wake costs, and bid floors.",
+    "- Auction WON is not success; only positive net is success. LOSS is bad. Losing an auction above cost is acceptable.",
+    "- Mention if the agent is wasting tokens polling/waiting after bids or reviews.",
+    "",
+    "Output format:",
+    "# History learnings",
+    "- Balance/cost trend: ...",
+    "- Typical wake costs: ...",
+    "- Completed task outcomes: compact bullets with paid/cost/net for recent/relevant tasks",
+    "- Bidding rules for next wake: concrete bid floor guidance and when to skip",
+    "- Red flags: ...",
+    "",
+    "Raw history follows between fences:",
+    "```history",
+    rawHistory,
+    "```",
+  ].join("\n");
+}
+
+interface HistorySummaryResult {
+  text: string;
+  usage: AgentUsage;
+  model: string;
+  summarized: boolean;
+  error?: string;
+}
+
+async function summarizeHistoryWithPi(rawHistory: string): Promise<HistorySummaryResult> {
+  const cfg = findRpcConfig();
+  const model = process.env.CATALLAXY_HISTORY_SUMMARY_MODEL ?? process.env.AGENT_MODEL ?? "openrouter/deepseek/deepseek-v4-flash";
+  const timeoutMs = Math.max(1_000, parseInt(process.env.CATALLAXY_HISTORY_SUMMARY_TIMEOUT_MS ?? "90000", 10) || 90_000);
+  const maxChars = Math.max(1_000, parseInt(process.env.CATALLAXY_HISTORY_SUMMARY_MAX_CHARS ?? "8000", 10) || 8_000);
+
+  const dir = await mkdtemp(join(tmpdir(), "catallaxy-history-"));
+  const promptPath = join(dir, "prompt.md");
+  await writeFile(promptPath, historySummaryPrompt(rawHistory));
+
+  const args = [
+    "--mode", "json",
+    "--no-session",
+    "--no-tools",
+    "--no-extensions",
+    "--no-context-files",
+    "--no-skills",
+    "--no-prompt-templates",
+    "--model", model,
+    "--api-key", cfg.token,
+    `@${promptPath}`,
+  ];
+
+  return await new Promise<HistorySummaryResult>((resolve) => {
+    const usage = emptyUsage();
+    let latestText = "";
+    let stdout = "";
+    let stderr = "";
+    let settled = false;
+
+    const proc = spawn("pi", args, {
+      cwd: process.cwd(),
+      stdio: ["ignore", "pipe", "pipe"],
+      env: {
+        ...process.env,
+        FORCE_COLOR: "0",
+        NO_COLOR: "1",
+        PI_SKIP_VERSION_CHECK: "1",
+      },
+    });
+
+    const finish = (result: HistorySummaryResult) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      void rm(dir, { recursive: true, force: true });
+      resolve(result);
+    };
+
+    const timer = setTimeout(() => {
+      try { proc.kill("SIGTERM"); } catch {}
+      finish({
+        text: "",
+        usage,
+        model,
+        summarized: false,
+        error: `history summarizer timed out after ${timeoutMs}ms`,
+      });
+    }, timeoutMs);
+
+    proc.stdout.on("data", (chunk: Buffer) => {
+      stdout += chunk.toString("utf-8");
+      let idx: number;
+      while ((idx = stdout.indexOf("\n")) >= 0) {
+        const line = stdout.slice(0, idx);
+        stdout = stdout.slice(idx + 1);
+        if (!line.trim()) continue;
+        try {
+          const ev = JSON.parse(line);
+          const u = usageFromTurnEnd(ev);
+          if (u) addUsage(usage, u);
+          if ((ev.type === "message_end" || ev.type === "turn_end") && ev.message) {
+            const text = textFromMessage(ev.message);
+            if (text) latestText = text;
+          }
+          if (ev.type === "agent_end" && Array.isArray(ev.messages)) {
+            for (const m of ev.messages) {
+              if (m?.role === "assistant") {
+                const text = textFromMessage(m);
+                if (text) latestText = text;
+              }
+            }
+          }
+        } catch {
+          // Ignore non-JSON fragments.
+        }
+      }
+    });
+    proc.stderr.on("data", (chunk: Buffer) => { stderr += chunk.toString("utf-8"); });
+    proc.on("error", (err: Error) => finish({ text: "", usage, model, summarized: false, error: err.message }));
+    proc.on("close", (code) => {
+      if (settled) return;
+      if (code !== 0) {
+        finish({
+          text: "",
+          usage,
+          model,
+          summarized: false,
+          error: `history summarizer exited ${code}: ${stderr.slice(0, 500)}`,
+        });
+        return;
+      }
+      const text = latestText.trim();
+      if (!text) {
+        finish({ text: "", usage, model, summarized: false, error: "history summarizer produced no text" });
+        return;
+      }
+      finish({
+        text: text.length > maxChars ? `${text.slice(0, maxChars)}\n\n[summary truncated]` : text,
+        usage,
+        model,
+        summarized: true,
+      });
+    });
+  });
+}
+
+function historyTail(text: string): string {
+  const chars = Math.max(1_000, parseInt(process.env.CATALLAXY_HISTORY_FALLBACK_CHARS ?? "6000", 10) || 6_000);
+  if (text.length <= chars) return text;
+  return `[history summarizer unavailable; showing last ${chars} chars of raw history]\n\n${text.slice(-chars)}`;
+}
+
+async function historyForAgent(rawHistory: string): Promise<{ text: string; details: Record<string, unknown> }> {
+  if (!rawHistory.trim()) return { text: "(history empty)", details: { length: 0, summarized: false } };
+
+  const threshold = Math.max(0, parseInt(process.env.CATALLAXY_HISTORY_SUMMARY_THRESHOLD_CHARS ?? "8000", 10) || 8_000);
+  if (process.env.CATALLAXY_HISTORY_SUMMARY_DISABLE === "1" || rawHistory.length < threshold) {
+    return { text: rawHistory, details: { length: rawHistory.length, summarized: false } };
+  }
+
+  const summary = await summarizeHistoryWithPi(rawHistory);
+  if (!summary.summarized) {
+    const fallback = historyTail(rawHistory);
+    return {
+      text: `${fallback}\n\n[history summarizer error: ${summary.error ?? "unknown"}]`,
+      details: {
+        length: rawHistory.length,
+        summarized: false,
+        summarizer_error: summary.error ?? "unknown",
+        history_summarizer_usage: summary.usage,
+        history_summarizer_model: summary.model,
+      },
+    };
+  }
+
+  return {
+    text: summary.text,
+    details: {
+      length: rawHistory.length,
+      summarized: true,
+      raw_length: rawHistory.length,
+      summary_length: summary.text.length,
+      history_summarizer_usage: summary.usage,
+      history_summarizer_model: summary.model,
+    },
+  };
+}
+
 function fmtRel(ms: number): string {
   const abs = Math.abs(ms);
   if (abs < 60_000) return `${Math.max(1, Math.round(abs / 1000))}s`;
@@ -171,7 +410,7 @@ const taskInfoTool = defineTool({
 const placeBidTool = defineTool({
   name: "place_bid",
   label: "Place a bid",
-  description: "Place or update a bid on an open auction. PRICE is your declared minimum acceptable payment / cost estimate. Reverse Vickrey: lowest valid bidder wins, but payment after LGTM is the second-lowest valid bid, or the private reservation if there is only one valid bid. This tool is the ONLY way to bid — narrating 'I bid X' in text does nothing."
+  description: "Place or update a bid on an open auction. PRICE is your declared minimum acceptable payment / cost estimate. Reverse Vickrey: lowest valid bidder wins, but payment after LGTM is the second-lowest valid bid, or the private reservation if there is only one valid bid. This tool is the ONLY way to bid — narrating 'I bid X' in text does nothing.",
   parameters: Type.Object({
     task_id: Type.String({ description: "The task ID to bid on, e.g. 'task-001'" }),
     price: Type.Integer({ minimum: 1, description: "Bid price in tokens (positive integer)" }),
@@ -245,12 +484,12 @@ const taskVerdictsTool = defineTool({
 const historyTool = defineTool({
   name: "history",
   label: "Read history",
-  description: "Read your full append-only history log. The orchestrator writes wake costs (in/out/cache token counts), bids placed, won/lost auctions, review calls, and per-task `paid X cost Y net Z` summaries. You CAN'T write to it — call this tool whenever you need to consult past costs to size a bid.",
+  description: "Read your append-only history log. For large histories this tool delegates to an isolated no-tool pi subprocess and returns compact cost/bidding learnings instead of flooding your context with raw logs. The summarizer usage is still charged to your balance. You CAN'T write to history — call this tool whenever you need to consult past costs to size a bid.",
   parameters: Type.Object({}),
   async execute() {
     const { text } = await rpc().call("history");
-    if (!text) return { content: [{ type: "text", text: "(history empty)" }], details: { length: 0 } };
-    return { content: [{ type: "text", text }], details: { length: text.length } };
+    const result = await historyForAgent(text ?? "");
+    return { content: [{ type: "text", text: result.text }], details: result.details };
   },
 });
 

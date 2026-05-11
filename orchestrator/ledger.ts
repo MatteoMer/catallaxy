@@ -220,6 +220,16 @@ export function summarizeTaskSettlement(
   return { thinking, reviewFees, received, net: received - thinking - reviewFees };
 }
 
+export function formatFinancialOutcome(net: number): string {
+  if (net < 0) {
+    return `Financial outcome: LOSS ${net} — BAD. This auction win reduced your balance; for similar tasks, bid above observed total cost plus margin or skip.`;
+  }
+  if (net > 0) {
+    return `Financial outcome: WIN +${net} — good. This grew your balance; keep your bid floor at true total cost plus margin.`;
+  }
+  return "Financial outcome: BREAK-EVEN 0 — not good. You took risk for no profit; bid higher or skip similar tasks.";
+}
+
 export async function recordEvent(agent: string, at: Date, message: string): Promise<void> {
   const path = `${HISTORY_DIR}/${agent}.md`;
   const timestamp = at.toISOString().replace("T", " ").slice(0, 19);
@@ -291,6 +301,7 @@ export async function flushPendingSummaries(
       `Payment: ${s.received}`,
       `Cost: ${totalCost} (thinking ${s.thinking}, review fees ${s.reviewFees})`,
       `Net: ${s.net}`,
+      formatFinancialOutcome(s.net),
       "",
     ];
     await appendToFile(`${HISTORY_DIR}/${agent}.md`, lines.join("\n"));

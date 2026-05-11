@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { summarizeTaskSettlement, type Ledger } from "../orchestrator/ledger";
+import { formatFinancialOutcome, summarizeTaskSettlement, type Ledger } from "../orchestrator/ledger";
 
 test("task settlement summary uses exact task-addressed paid/review entries", () => {
   const ledger: Ledger = {
@@ -22,4 +22,10 @@ test("task settlement summary uses exact task-addressed paid/review entries", ()
     new Date("2026-01-01T00:00:00.000Z"),
     new Date("2026-01-01T00:00:10.000Z"),
   )).toEqual({ thinking: 100, reviewFees: 2_000, received: 10_000, net: 7_900 });
+});
+
+test("financial outcome labels losses as bad and wins as positive net", () => {
+  expect(formatFinancialOutcome(-5)).toContain("Financial outcome: LOSS -5 — BAD");
+  expect(formatFinancialOutcome(7)).toContain("Financial outcome: WIN +7");
+  expect(formatFinancialOutcome(0)).toContain("BREAK-EVEN 0 — not good");
 });

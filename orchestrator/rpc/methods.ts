@@ -23,6 +23,46 @@ const MARKET = process.env.MARKET_DIR ?? `${ROOT}/market`;
 const AGENTS_DIR = process.env.AGENTS_DIR ?? `${ROOT}/agents`;
 const HISTORY_DIR = process.env.AGENT_HISTORY_DIR ?? `${ROOT}/orchestrator/private/history`;
 
+export interface WakeScope {
+  kind: "bid" | "work";
+  taskId?: string;
+}
+
+const wakeScopes = new Map<string, WakeScope>();
+
+export function setWakeScope(agent: string, scope: WakeScope): void {
+  wakeScopes.set(agent, scope);
+}
+
+export function clearWakeScope(agent: string): void {
+  wakeScopes.delete(agent);
+}
+
+function wakeScope(agent: string): WakeScope | undefined {
+  return wakeScopes.get(agent);
+}
+
+function assertWorkTaskAllowed(agent: string, taskId: string, method: string): void {
+  const scope = wakeScope(agent);
+  if (!scope) return;
+  if (scope.kind === "bid") throw new Error(`${method} is disabled during bid wakes`);
+  if (scope.taskId && taskId !== scope.taskId) {
+    throw new Error(`work wake is scoped to ${scope.taskId}; ${method} for ${taskId} is not allowed`);
+  }
+}
+
+function assertTaskInfoAllowed(agent: string, taskId: string, taskStatus: string): void {
+  const scope = wakeScope(agent);
+  if (!scope) return;
+  if (scope.kind === "work") {
+    if (scope.taskId && taskId !== scope.taskId) {
+      throw new Error(`work wake is scoped to ${scope.taskId}; task_info for ${taskId} is not allowed`);
+    }
+    return;
+  }
+  if (taskStatus !== "open") throw new Error(`bid wake can only inspect open auctions; ${taskId} is ${taskStatus}`);
+}
+
 async function readJson<T>(path: string): Promise<T> {
   return JSON.parse(await readFile(path, "utf-8")) as T;
 }
@@ -40,7 +80,9 @@ async function listJson(dir: string): Promise<string[]> {
   }
 }
 
-export async function list_tasks(_agent: string, _params: unknown): Promise<{ tasks: any[] }> {
+export async function list_tasks(agent: string, _params: unknown): Promise<{ tasks: any[] }> {
+  const scope = wakeScope(agent);
+  if (scope?.kind === "work") throw new Error("list_tasks is disabled during work wakes");
   const out: any[] = [];
   for (const f of await listJson(`${MARKET}/tasks`)) {
     try {
@@ -58,23 +100,28 @@ export async function list_tasks(_agent: string, _params: unknown): Promise<{ ta
   return { tasks: out };
 }
 
-export async function task_info(_agent: string, params: any): Promise<any> {
+export async function task_info(agent: string, params: any): Promise<any> {
   const taskId = params?.task_id;
   if (typeof taskId !== "string") throw new Error("task_id required");
+  let t: any;
   try {
-    const t = TaskSchema.parse(await readJson(`${MARKET}/tasks/${taskId}.json`));
-    return { task: t };
+    t = TaskSchema.parse(await readJson(`${MARKET}/tasks/${taskId}.json`));
   } catch {
     return { task: null };
   }
+  assertTaskInfoAllowed(agent, taskId, t.status);
+  return { task: t };
 }
 
 export async function my_assignments(agent: string, _params: unknown): Promise<{ assignments: any[] }> {
   const out: any[] = [];
+  const scope = wakeScope(agent);
   for (const f of await listJson(`${MARKET}/assignments`)) {
     try {
       const a = AssignmentSchema.parse(await readJson(`${MARKET}/assignments/${f}`));
       if (a.winner !== agent) continue;
+      if (scope?.kind === "work" && scope.taskId && a.task_id !== scope.taskId) continue;
+      if (scope?.kind === "bid") continue;
       let task: any = null;
       try { task = TaskSchema.parse(await readJson(`${MARKET}/tasks/${a.task_id}.json`)); } catch {}
       out.push({
@@ -92,6 +139,7 @@ export async function my_assignments(agent: string, _params: unknown): Promise<{
 export async function task_verdicts(agent: string, params: any): Promise<{ verdicts: any[] }> {
   const taskId = params?.task_id;
   if (typeof taskId !== "string") throw new Error("task_id required");
+  assertWorkTaskAllowed(agent, taskId, "task_verdicts");
   const out: any[] = [];
   for (const f of await listJson(`${MARKET}/review_responses`)) {
     try {
@@ -104,12 +152,18 @@ export async function task_verdicts(agent: string, params: any): Promise<{ verdi
 }
 
 export async function place_bid(agent: string, params: any): Promise<{ bid: any }> {
+  const scope = wakeScope(agent);
+  if (scope?.kind === "work") throw new Error("place_bid is disabled during work wakes");
   const taskId = params?.task_id;
   const price = params?.price;
   if (typeof taskId !== "string") throw new Error("task_id required");
   if (typeof price !== "number" || !Number.isFinite(price) || price < 1 || !Number.isInteger(price)) {
     throw new Error("price must be a positive integer");
   }
+  let task: any;
+  try { task = TaskSchema.parse(await readJson(`${MARKET}/tasks/${taskId}.json`)); }
+  catch { throw new Error(`task ${taskId} not found`); }
+  if (task.status !== "open") throw new Error(`cannot bid on ${taskId}; task is ${task.status}`);
   const balance = await my_balance(agent, null);
   if ((balance.balance ?? 0) <= 0) throw new Error("bankrupt agents cannot bid");
   const bid = {
@@ -130,8 +184,17 @@ export async function request_review(agent: string, params: any): Promise<{ requ
   const branch = params?.branch;
   if (typeof taskId !== "string") throw new Error("task_id required");
   if (typeof branch !== "string" || !branch) throw new Error("branch required");
+  assertWorkTaskAllowed(agent, taskId, "request_review");
   const balance = await my_balance(agent, null);
   if ((balance.balance ?? 0) <= 0) throw new Error("bankrupt agents cannot request review");
+  let assignment: any;
+  try { assignment = AssignmentSchema.parse(await readJson(`${MARKET}/assignments/${taskId}.json`)); }
+  catch { throw new Error(`no assignment for ${taskId}`); }
+  if (assignment.winner !== agent) throw new Error(`${agent} is not assigned to ${taskId}`);
+  let task: any;
+  try { task = TaskSchema.parse(await readJson(`${MARKET}/tasks/${taskId}.json`)); }
+  catch { throw new Error(`task ${taskId} not found`); }
+  if (task.status !== "assigned") throw new Error(`cannot request review for ${taskId}; task is ${task.status}`);
   const existing = (await listJson(`${MARKET}/review_requests`))
     .filter((f) => f.startsWith(`${taskId}-${agent}-`));
   const seq = existing.length + 1;

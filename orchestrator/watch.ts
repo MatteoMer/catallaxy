@@ -35,12 +35,19 @@ import { generateTokens, REVIEWER_PRINCIPAL, type TokenMap } from "./auth";
 import { dim, gray, cyan, magenta, brightMagenta, yellow, brightYellow, red, brightRed, green, brightGreen, bold, blue } from "./log";
 import { renderMarkdownTables } from "./markdown";
 import { logEvent } from "./events";
+import { clearWakeScope, setWakeScope } from "./rpc/methods";
 
 const AGENTS_DIR = process.env.AGENTS_DIR ?? "./agents";
 const MARKET = process.env.MARKET_DIR ?? "./market";
 const MIN_WAKE_INTERVAL_MS = parseInt(process.env.MIN_WAKE_INTERVAL_MS ?? "5000", 10);
 const RECONCILE_MS = parseInt(process.env.RECONCILE_MS ?? "60000", 10);
 const AGENT_WAKE_TIMEOUT_MS = parseInt(process.env.AGENT_WAKE_TIMEOUT_MS ?? String(10 * 60_000), 10);
+// Bid wakes should only price auctions. Once at least this many successful
+// place_bid calls have happened, stop the pi process after the billed turn.
+// This prevents agents from burning their balance polling for settlement.
+const BID_WAKE_MAX_SUCCESSFUL_BIDS = Math.max(0, parseInt(process.env.CATALLAXY_BID_WAKE_MAX_BIDS ?? "1", 10) || 0);
+const WORK_WAKE_RETRY_MS = Math.max(0, parseInt(process.env.CATALLAXY_WORK_WAKE_RETRY_MS ?? String(2 * 60_000), 10) || 0);
+const MAX_CONCURRENT_WAKES = Math.max(1, parseInt(process.env.CATALLAXY_MAX_CONCURRENT_WAKES ?? "4", 10) || 4);
 
 async function discoverAgents(): Promise<string[]> {
   const entries = await readdir(AGENTS_DIR, { withFileTypes: true });
@@ -109,7 +116,7 @@ async function readJsonOrNull<T>(path: string, schema: { parse: (d: unknown) => 
 async function listJsonFiles(dir: string): Promise<string[]> {
   try {
     const files = await readdir(dir);
-    return files.filter((f) => f.endsWith(".json"));
+    return files.filter((f) => f.endsWith(".json")).sort();
   } catch {
     return [];
   }
@@ -222,9 +229,14 @@ async function buildWakePlan(agent: string): Promise<WakePlan> {
       lines.push(`${focus}: review #${v.seq} → ${v.verdict}.`);
     }
     lines.push("");
-    lines.push("Enabled tools this wake:");
-    lines.push("  my_assignments, task_info, task_verdicts, request_review, my_balance, history");
-    lines.push("  read, bash, edit, write for implementation work inside your sandbox");
+    lines.push("Enabled tools this WORK wake (only these are available):");
+    lines.push(`  my_assignments  — returns only focused assignment ${focus}`);
+    lines.push(`  task_info       — details for focused task ${focus} only`);
+    lines.push(`  task_verdicts   — verdicts for focused task ${focus} only`);
+    lines.push(`  request_review  — request review for focused task ${focus}; after a successful request this wake will be cut off`);
+    lines.push("  my_balance      — current token balance");
+    lines.push("  history         — compact cost/bidding learnings from your history");
+    lines.push("  read, bash, edit, write — implementation work inside your sandbox only");
     lines.push("");
     lines.push("Cash discipline: your balance is debited after every model turn. If it hits 0 mid-wake, the wake is aborted and you are bankrupt. Keep this work wake short; don't keep spending into a negative-net assignment.");
     return {
@@ -239,12 +251,16 @@ async function buildWakePlan(agent: string): Promise<WakePlan> {
   lines.push(`Open auctions: ${openIds.length ? openIds.join(", ") : "none"}.`);
   lines.push("The open-auction list above is only a snapshot. Call list_tasks before bidding; new auctions may have appeared since this wake started.");
   lines.push("");
-  lines.push("Enabled tools this wake:");
-  lines.push("  list_tasks, task_info, place_bid, my_balance, history");
-  lines.push("Implementation tools and review tools are disabled during bid wakes. Do not do task work before assignment.");
+  lines.push("Enabled tools this BID wake (only these are available):");
+  lines.push("  list_tasks  — list currently open auctions");
+  lines.push("  task_info   — details for open auctions only");
+  lines.push("  place_bid   — place/update a bid; after a successful bid this wake will be cut off");
+  lines.push("  my_balance  — current token balance");
+  lines.push("  history     — compact cost/bidding learnings from your history");
+  lines.push("Implementation, assignment, and review tools are disabled during bid wakes. Do not do task work before assignment.");
   lines.push("");
-  lines.push("Before bidding: call `history` and read EVERY line — both per-task summaries and individual `Wakeup cost: N tokens` lines. Thinking tokens dominate. Reverse Vickrey auction: bid your true expected TOTAL cost plus margin; if you win, payment is second-lowest valid bid or reservation, not necessarily your bid. Underbidding only makes you win bad work. Goal: grow balance, not win auctions; don't work at a loss.");
-  lines.push("Cash discipline: your balance is debited after every model turn. If it hits 0 mid-wake, the wake is aborted and you are bankrupt. Place at most a few bids, then stop.");
+  lines.push("Before bidding: call `history` and use its compact cost learnings plus recent wake costs and task nets. Thinking tokens dominate. Reverse Vickrey auction: bid your true expected TOTAL cost plus margin; if you win, payment is second-lowest valid bid or reservation, not necessarily your bid. Underbidding only makes you win bad work. Goal: grow balance, not win auctions; don't work at a loss.");
+  lines.push("Cash discipline: your balance is debited after every model turn. If it hits 0 mid-wake, the wake is aborted and you are bankrupt. Pick the single best profitable auction, place one bid, then stop; this wake will be cut off after a successful bid.");
   return {
     kind: "bid",
     prompt: lines.join("\n"),
@@ -305,12 +321,27 @@ function addUsage(a: AgentUsage, b: AgentUsage): void {
   a.costUsd += b.costUsd;
 }
 
+function usageFromHistorySummarizerEvent(ev: any): AgentUsage | null {
+  if (ev?.type !== "tool_execution_end" || ev.toolName !== "history" || ev.isError) return null;
+  const u = ev.result?.details?.history_summarizer_usage ?? ev.result?.history_summarizer_usage;
+  if (!u || typeof u !== "object") return null;
+  const usage = {
+    inputTokens: Number(u.inputTokens ?? 0),
+    outputTokens: Number(u.outputTokens ?? 0),
+    cacheReadTokens: Number(u.cacheReadTokens ?? 0),
+    totalTokens: Number(u.totalTokens ?? 0),
+    costUsd: Number(u.costUsd ?? 0),
+  };
+  if (!Number.isFinite(usage.totalTokens) || usage.totalTokens <= 0) return null;
+  return usage;
+}
+
 interface BankruptcyInfo {
   at: Date;
   wakeId?: string;
   kind?: "bid" | "work";
   taskId?: string;
-  source: "turn_debit" | "check";
+  source: "turn_debit" | "history_summarizer" | "check";
   balanceBefore?: number;
   balanceAfter: number;
   debitTokens?: number;
@@ -318,6 +349,41 @@ interface BankruptcyInfo {
 }
 
 type BankruptcyRecorder = (agent: string, info: BankruptcyInfo) => Promise<void>;
+
+function spawnIgnore(args: string[]): void {
+  const p = Bun.spawn(args, { stdout: "ignore", stderr: "ignore" });
+  void p.exited.catch(() => {});
+}
+
+function stopWakeProcess(proc: ReturnType<typeof Bun.spawn>, agent: string, wakeId: string): void {
+  const containerName = `catallaxy-agent-${agent}-${wakeId}`;
+  try { proc.kill("SIGTERM"); } catch {}
+  spawnIgnore(["docker", "rm", "-f", containerName]);
+  spawnIgnore(["pkill", "-TERM", "-f", containerName]);
+  setTimeout(() => {
+    try { proc.kill("SIGKILL"); } catch {}
+    spawnIgnore(["docker", "rm", "-f", containerName]);
+    spawnIgnore(["pkill", "-KILL", "-f", containerName]);
+  }, 2000);
+}
+
+async function hasPendingReviewRequest(taskId: string, agent: string): Promise<boolean> {
+  let latestRequest = -1;
+  for (const f of await listJsonFiles(`${MARKET}/review_requests`)) {
+    if (!f.startsWith(`${taskId}-${agent}-`)) continue;
+    const r = await readJsonOrNull(`${MARKET}/review_requests/${f}`, ReviewRequestSchema);
+    if (r) latestRequest = Math.max(latestRequest, r.seq);
+  }
+  if (latestRequest < 0) return false;
+
+  let latestResponse = -1;
+  for (const f of await listJsonFiles(`${MARKET}/review_responses`)) {
+    if (!f.startsWith(`${taskId}-${agent}-`)) continue;
+    const r = await readJsonOrNull(`${MARKET}/review_responses/${f}`, ReviewResponseSchema);
+    if (r) latestResponse = Math.max(latestResponse, r.seq);
+  }
+  return latestRequest > latestResponse;
+}
 
 async function runAgent(
   agent: string,
@@ -339,6 +405,7 @@ async function runAgent(
     model,
     tools: plan.tools,
   });
+  setWakeScope(agent, { kind: plan.kind, taskId: plan.taskId });
 
   const token = tokens.byAgent.get(agent);
   if (!token) throw new Error(`no auth token for agent '${agent}'`);
@@ -356,6 +423,11 @@ async function runAgent(
   let buffer = "";
   let abortedForBankruptcy = false;
   let timedOut = false;
+  let stoppedAfterBid = false;
+  let stoppedAfterReview = false;
+  let successfulBidsThisWake = 0;
+  let successfulReviewsThisWake = 0;
+  let stopAfterCurrentTurn: "bid" | "review" | null = null;
   const timeout = AGENT_WAKE_TIMEOUT_MS > 0 ? setTimeout(() => {
     timedOut = true;
     console.log(brightRed(`    ${agent}: wake ${wakeId} timed out after ${AGENT_WAKE_TIMEOUT_MS}ms; killing ${plan.kind} wake`));
@@ -368,19 +440,82 @@ async function runAgent(
       timeout_ms: AGENT_WAKE_TIMEOUT_MS,
       balance_after: ledger[agent]?.balance ?? null,
     });
-    try { proc.kill("SIGTERM"); } catch {}
-    // If this is a docker-backed wake, killing the local `docker run`
-    // process is not always enough to tear down a wedged child command.
-    // Best-effort remove the named container too; direct-spawn runs simply
-    // won't have such a container.
-    void Bun.spawn(["docker", "rm", "-f", `catallaxy-agent-${agent}-${wakeId}`], {
-      stdout: "ignore",
-      stderr: "ignore",
-    }).exited;
+    stopWakeProcess(proc, agent, wakeId);
   }, AGENT_WAKE_TIMEOUT_MS) : undefined;
 
   const processLine = async (line: string) => {
     handlePiEvent(agent, line);
+    let ev: any = null;
+    try { ev = JSON.parse(line); } catch {}
+    if (
+      plan.kind === "bid" &&
+      BID_WAKE_MAX_SUCCESSFUL_BIDS > 0 &&
+      ev?.type === "tool_execution_end" &&
+      ev.toolName === "place_bid" &&
+      !ev.isError
+    ) {
+      successfulBidsThisWake++;
+      if (successfulBidsThisWake >= BID_WAKE_MAX_SUCCESSFUL_BIDS) stopAfterCurrentTurn = "bid";
+    }
+    if (
+      plan.kind === "work" &&
+      ev?.type === "tool_execution_end" &&
+      ev.toolName === "request_review" &&
+      !ev.isError
+    ) {
+      successfulReviewsThisWake++;
+      stopAfterCurrentTurn = "review";
+    }
+
+    const historySummarizerUsage = usageFromHistorySummarizerEvent(ev);
+    if (historySummarizerUsage) {
+      addUsage(usage, historySummarizerUsage);
+      const at = new Date();
+      const balanceBefore = ledger[agent]?.balance ?? 0;
+      debit(
+        ledger,
+        agent,
+        historySummarizerUsage.totalTokens,
+        `History summarizer: ${historySummarizerUsage.totalTokens}tok ($${historySummarizerUsage.costUsd.toFixed(4)})`,
+        at
+      );
+      const balanceAfter = ledger[agent]?.balance ?? 0;
+      console.log(dim(`    ${agent}: -${historySummarizerUsage.totalTokens.toLocaleString()} history-summary tokens ($${historySummarizerUsage.costUsd.toFixed(4)}), balance ${balanceAfter.toLocaleString()}`));
+      await logEvent({
+        type: "history_summarizer_debit",
+        at: at.toISOString(),
+        agent,
+        wake_id: wakeId,
+        kind: plan.kind,
+        task_id: plan.taskId,
+        tokens: historySummarizerUsage.totalTokens,
+        input_tokens: historySummarizerUsage.inputTokens,
+        output_tokens: historySummarizerUsage.outputTokens,
+        cache_read_tokens: historySummarizerUsage.cacheReadTokens,
+        cost_usd: historySummarizerUsage.costUsd,
+        balance_before: balanceBefore,
+        balance_after: balanceAfter,
+      });
+      await saveLedger(ledger);
+      await syncBalances(ledger);
+      if (balanceAfter <= 0 && !abortedForBankruptcy) {
+        abortedForBankruptcy = true;
+        await recordBankruptcy?.(agent, {
+          at,
+          wakeId,
+          kind: plan.kind,
+          taskId: plan.taskId,
+          source: "history_summarizer",
+          balanceBefore,
+          balanceAfter,
+          debitTokens: historySummarizerUsage.totalTokens,
+          debitCostUsd: historySummarizerUsage.costUsd,
+        });
+        console.log(brightRed(`    ${agent}: bankrupt during history summarizer; aborting ${plan.kind} wake`));
+        stopWakeProcess(proc, agent, wakeId);
+      }
+    }
+
     const turnUsage = usageFromTurnEnd(line);
     if (!turnUsage || turnUsage.totalTokens <= 0) return;
     addUsage(usage, turnUsage);
@@ -420,7 +555,33 @@ async function runAgent(
         debitCostUsd: turnUsage.costUsd,
       });
       console.log(brightRed(`    ${agent}: bankrupt mid-wake; aborting ${plan.kind} wake`));
-      try { proc.kill("SIGTERM"); } catch {}
+      stopWakeProcess(proc, agent, wakeId);
+    } else if (stopAfterCurrentTurn === "bid" && !stoppedAfterBid) {
+      stoppedAfterBid = true;
+      console.log(dim(`    ${agent}: bid wake cutoff after ${successfulBidsThisWake} successful bid(s)`));
+      await logEvent({
+        type: "bid_wake_cutoff",
+        at: at.toISOString(),
+        agent,
+        wake_id: wakeId,
+        successful_bids: successfulBidsThisWake,
+        max_successful_bids: BID_WAKE_MAX_SUCCESSFUL_BIDS,
+        balance_after: balanceAfter,
+      });
+      stopWakeProcess(proc, agent, wakeId);
+    } else if (stopAfterCurrentTurn === "review" && !stoppedAfterReview) {
+      stoppedAfterReview = true;
+      console.log(dim(`    ${agent}: work wake cutoff after ${successfulReviewsThisWake} successful review request(s)`));
+      await logEvent({
+        type: "work_wake_cutoff",
+        at: at.toISOString(),
+        agent,
+        wake_id: wakeId,
+        task_id: plan.taskId,
+        successful_reviews: successfulReviewsThisWake,
+        balance_after: balanceAfter,
+      });
+      stopWakeProcess(proc, agent, wakeId);
     }
   };
 
@@ -444,7 +605,7 @@ async function runAgent(
     wake_id: wakeId,
     kind: plan.kind,
     task_id: plan.taskId,
-    status: timedOut ? "timeout" : abortedForBankruptcy ? "bankrupt" : exitCode === 0 ? "ok" : "error",
+    status: timedOut ? "timeout" : abortedForBankruptcy ? "bankrupt" : stoppedAfterBid ? "bid_cutoff" : stoppedAfterReview ? "review_cutoff" : exitCode === 0 ? "ok" : "error",
     exit_code: exitCode,
     total_tokens: usage.totalTokens,
     input_tokens: usage.inputTokens,
@@ -453,7 +614,7 @@ async function runAgent(
     cost_usd: usage.costUsd,
     balance_after: ledger[agent]?.balance ?? null,
   });
-  if (exitCode !== 0 && !abortedForBankruptcy && !timedOut) {
+  if (exitCode !== 0 && !abortedForBankruptcy && !timedOut && !stoppedAfterBid && !stoppedAfterReview) {
     console.error(red(`  [${agent}] exit ${exitCode}: ${stderr.slice(0, 200)}`));
   }
   return usage;
@@ -462,19 +623,23 @@ async function runAgent(
 async function wakeAgent(agent: string, ledger: Ledger, tokens: TokenMap, recordBankruptcy?: BankruptcyRecorder): Promise<void> {
   const at = new Date();
   console.log(brightMagenta(`  → waking ${agent} at ${at.toISOString().slice(11, 19)}`));
-  const usage = await runAgent(agent, ledger, tokens, recordBankruptcy);
-  if (usage.totalTokens > 0) {
-    console.log(dim(`    ${agent}: wake total -${usage.totalTokens.toLocaleString()} tokens ($${usage.costUsd.toFixed(4)})`));
+  try {
+    const usage = await runAgent(agent, ledger, tokens, recordBankruptcy);
+    if (usage.totalTokens > 0) {
+      console.log(dim(`    ${agent}: wake total -${usage.totalTokens.toLocaleString()} tokens ($${usage.costUsd.toFixed(4)})`));
+    }
+    const ctx = await gatherWakeupContext(agent, at);
+    await recordWakeup(agent, at, usage, ctx);
+    // Now that this wake's debit has posted, flush any task-completion
+    // summaries that were deferred while this wake was in flight.
+    await flushPendingSummaries(ledger, agent, new Date());
+  } finally {
+    clearWakeScope(agent);
   }
-  const ctx = await gatherWakeupContext(agent, at);
-  await recordWakeup(agent, at, usage, ctx);
-  // Now that this wake's debit has posted, flush any task-completion
-  // summaries that were deferred while this wake was in flight.
-  await flushPendingSummaries(ledger, agent, new Date());
 }
 
 async function main() {
-  console.log(bold(`Catallaxy watcher: event-driven (min wake interval ${MIN_WAKE_INTERVAL_MS}ms, reconcile every ${RECONCILE_MS}ms)`));
+  console.log(bold(`Catallaxy watcher: event-driven (min wake interval ${MIN_WAKE_INTERVAL_MS}ms, reconcile every ${RECONCILE_MS}ms, max ${MAX_CONCURRENT_WAKES} concurrent wakes)`));
 
   const agentNames = await discoverAgents();
   console.log(cyan(`Agents: ${agentNames.join(", ")}`));
@@ -483,6 +648,7 @@ async function main() {
     min_wake_interval_ms: MIN_WAKE_INTERVAL_MS,
     reconcile_ms: RECONCILE_MS,
     agent_wake_timeout_ms: AGENT_WAKE_TIMEOUT_MS,
+    max_concurrent_wakes: MAX_CONCURRENT_WAKES,
     agents: agentNames,
   });
 
@@ -525,6 +691,33 @@ async function main() {
   const deadlineTimers = new Map<string, ReturnType<typeof setTimeout>>();
   const wakeStatus = new Map<string, "running" | "pending">();
   const lastWoken = new Map<string, number>();
+  const lastWorkRetry = new Map<string, number>();
+  let activeWakeSlots = 0;
+  const wakeSlotQueue: Array<() => void> = [];
+
+  const acquireWakeSlot = async (): Promise<void> => {
+    if (activeWakeSlots < MAX_CONCURRENT_WAKES) {
+      activeWakeSlots++;
+      return;
+    }
+    // The releasing wake transfers its slot directly to this waiter.
+    await new Promise<void>((resolve) => wakeSlotQueue.push(resolve));
+  };
+
+  const releaseWakeSlot = (): void => {
+    const next = wakeSlotQueue.shift();
+    if (next) next();
+    else activeWakeSlots--;
+  };
+
+  const withWakeSlot = async <T>(fn: () => Promise<T>): Promise<T> => {
+    await acquireWakeSlot();
+    try {
+      return await fn();
+    } finally {
+      releaseWakeSlot();
+    }
+  };
 
   // Serialize processReviewRequests calls so two concurrent fs.watch
   // events for the same review_request file can't double-process it.
@@ -615,7 +808,7 @@ async function main() {
 
     wakeStatus.set(agent, "running");
     try {
-      await wakeAgent(agent, ledger, tokens, recordBankruptcyOnce);
+      await withWakeSlot(() => wakeAgent(agent, ledger, tokens, recordBankruptcyOnce));
       lastWoken.set(agent, Date.now());
       await persist();
       await checkBankrupt();
@@ -625,6 +818,30 @@ async function main() {
       const wasPending = wakeStatus.get(agent) === "pending";
       wakeStatus.delete(agent);
       if (wasPending) triggerWake(agent, true);
+    }
+  };
+
+  const triggerAssignedWork = async (reason: "startup" | "reconcile"): Promise<void> => {
+    const nowMs = Date.now();
+    for (const f of await listJsonFiles(`${MARKET}/assignments`)) {
+      const ass = await readJsonOrNull(`${MARKET}/assignments/${f}`, AssignmentSchema);
+      if (!ass) continue;
+      if ((ledger[ass.winner]?.balance ?? 0) <= 0) continue;
+      if (wakeStatus.has(ass.winner)) continue;
+
+      const task = await readJsonOrNull(`${MARKET}/tasks/${ass.task_id}.json`, TaskSchema);
+      if (!task || task.status !== "assigned") continue;
+      if (await hasPendingReviewRequest(ass.task_id, ass.winner)) continue;
+
+      const key = `${ass.winner}:${ass.task_id}`;
+      const last = lastWorkRetry.get(key) ?? 0;
+      if (reason === "reconcile" && WORK_WAKE_RETRY_MS > 0 && nowMs - last < WORK_WAKE_RETRY_MS) continue;
+
+      lastWorkRetry.set(key, nowMs);
+      if (reason === "reconcile") {
+        console.log(dim(`reconcile: waking ${ass.winner} for active assignment ${ass.task_id}`));
+      }
+      triggerWake(ass.winner, true);
     }
   };
 
@@ -772,12 +989,7 @@ async function main() {
       triggerWake(a, false);
     }
   }
-  for (const f of await listJsonFiles(`${MARKET}/assignments`)) {
-    const ass = await readJsonOrNull(`${MARKET}/assignments/${f}`, AssignmentSchema);
-    if (!ass) continue;
-    const t = await readJsonOrNull(`${MARKET}/tasks/${ass.task_id}.json`, TaskSchema);
-    if (t && t.status === "assigned") triggerWake(ass.winner, true);
-  }
+  await triggerAssignedWork("startup");
   console.log(dim("Idling for events."));
 
   // Periodic reconciler — safety net for missed file events
@@ -791,6 +1003,7 @@ async function main() {
       }
       await settleAndPersist();
       await safeProcessReviews();
+      await triggerAssignedWork("reconcile");
       // Safety net: if an agent's last wake already debited but the flush
       // call inside wakeAgent somehow missed a marker (or the marker was
       // written after the wake ended), catch it here. Skip agents with a

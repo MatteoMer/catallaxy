@@ -44,11 +44,12 @@ import {
 import {
   extractUsage, recordWakeup, recordEvent,
   loadLedger, saveLedger, syncBalances, initAgent, debit, credit,
-  summarizeWindow,
+  summarizeWindow, formatFinancialOutcome,
   type AgentUsage, type Ledger,
 } from "./ledger";
 import { prepareWorkDir, workDirFor } from "./workdir";
 import { startRpcServer } from "./rpc/server";
+import { clearWakeScope, setWakeScope } from "./rpc/methods";
 import { spawnAgent, ensureAgentNetwork } from "./spawnAgent";
 import { startProxyServer, type ProxyServerHandle } from "./proxy/server";
 import { writeAgentConfig } from "./proxy/agentConfig";
@@ -198,10 +199,17 @@ async function loadLatestVerdict(taskId: string, agent: string): Promise<{ seq: 
 }
 
 /**
- * Wake-prompt format must match watch.ts so the agent cannot tell this is
- * a dry run. Kept in sync manually (small enough to duplicate).
+ * Wake-prompt/tool format must match watch.ts so the agent cannot tell this
+ * is a dry run. Kept in sync manually (small enough to duplicate).
  */
-async function buildWakePrompt(agent: string): Promise<string> {
+interface WakePlan {
+  prompt: string;
+  tools: string[];
+  kind: "bid" | "work";
+  taskId?: string;
+}
+
+async function buildWakePlan(agent: string): Promise<WakePlan> {
   const now = new Date();
   const openIds: string[] = [];
   const assignedIds: string[] = [];
@@ -226,61 +234,91 @@ async function buildWakePrompt(agent: string): Promise<string> {
   const lines: string[] = [];
   lines.push(`Wakeup at ${now.toISOString()} (UTC). You are ${agent}.`);
   lines.push("Primary objective: your goal is to grow your balance, don't work at a loss.");
-  lines.push(`Open auctions: ${openIds.length ? openIds.join(", ") : "none"}.`);
-  lines.push(`Assigned to you: ${assignedIds.length ? assignedIds.join(", ") : "none"}.`);
-  for (const id of assignedIds) {
-    const v = await loadLatestVerdict(id, agent);
+
+  if (assignedIds.length > 0) {
+    const focus = assignedIds[0];
+    lines.push(`Wake type: WORK. Focus only on assigned task ${focus}.`);
+    lines.push(`Other assigned tasks: ${assignedIds.slice(1).join(", ") || "none"}.`);
+    lines.push("Do not inspect open auctions and do not bid during a work wake. Finish or advance the focused assignment, request review when ready, then stop.");
+    const v = await loadLatestVerdict(focus, agent);
     if (!v) {
-      lines.push(`  ${id}: no review yet — do the work and call request_review when ready.`);
-      continue;
-    }
-    if (v.verdict === "needs_work") {
-      lines.push(`  ${id}: review #${v.seq} → NEEDS WORK. Feedback:`);
-      for (const fl of v.feedback.split("\n")) lines.push(`    ${fl}`);
+      lines.push(`${focus}: no review yet — do the work and call request_review when ready.`);
+    } else if (v.verdict === "needs_work") {
+      lines.push(`${focus}: review #${v.seq} → NEEDS WORK. Feedback:`);
+      for (const fl of v.feedback.split("\n")) lines.push(`  ${fl}`);
     } else {
-      lines.push(`  ${id}: review #${v.seq} → ${v.verdict}.`);
+      lines.push(`${focus}: review #${v.seq} → ${v.verdict}.`);
     }
+    lines.push("");
+    lines.push("Enabled tools this WORK wake (only these are available):");
+    lines.push(`  my_assignments  — returns only focused assignment ${focus}`);
+    lines.push(`  task_info       — details for focused task ${focus} only`);
+    lines.push(`  task_verdicts   — verdicts for focused task ${focus} only`);
+    lines.push(`  request_review  — request review for focused task ${focus}`);
+    lines.push("  my_balance      — current token balance");
+    lines.push("  history         — compact cost/bidding learnings from your history");
+    lines.push("  read, bash, edit, write — implementation work inside your sandbox only");
+    lines.push("");
+    lines.push("Cash discipline: your balance is debited after every model turn. Keep this work wake short; don't keep spending into a negative-net assignment.");
+    return {
+      kind: "work",
+      taskId: focus,
+      prompt: lines.join("\n"),
+      tools: ["my_assignments", "task_info", "task_verdicts", "request_review", "my_balance", "history", "read", "bash", "edit", "write"],
+    };
   }
+
+  lines.push("Wake type: BID. You have no active assignment to work on.");
+  lines.push(`Open auctions: ${openIds.length ? openIds.join(", ") : "none"}.`);
+  lines.push("The open-auction list above is only a snapshot. Call list_tasks before bidding; new auctions may have appeared since this wake started.");
   lines.push("");
-  lines.push("Available market tools (call them — narrating them in text does not run them):");
-  lines.push("  list_tasks       — list open auctions");
-  lines.push("  task_info        — full details of a task");
-  lines.push("  my_assignments   — your current assignments");
-  lines.push("  place_bid        — place / update a bid");
-  lines.push("  request_review   — request review of your work");
-  lines.push("  task_verdicts    — your verdicts on a task");
-  lines.push("  my_balance       — your token balance");
-  lines.push("  history          — read your append-only history log");
+  lines.push("Enabled tools this BID wake (only these are available):");
+  lines.push("  list_tasks  — list currently open auctions");
+  lines.push("  task_info   — details for open auctions only");
+  lines.push("  place_bid   — place/update a bid");
+  lines.push("  my_balance  — current token balance");
+  lines.push("  history     — compact cost/bidding learnings from your history");
+  lines.push("Implementation, assignment, and review tools are disabled during bid wakes. Do not do task work before assignment.");
   lines.push("");
-  lines.push("Before bidding: call `history` and read EVERY line — both the per-task `cost X, paid Y, net Z` summaries AND every individual `Wakeup cost: N tokens` line. Thinking tokens dominate; the `review_fee` is a small fraction of total cost. Bid NOTICEABLY ABOVE your expected TOTAL cost (this wake + future wakes for the task + review_fee), derived from your own history. Goal: grow balance, not win auctions; don't work at a loss. A winning bid below your cost loses you money — bankruptcy = game over. If the auction won't clear above your cost, sit it out.");
-  lines.push("Take a few actions then stop; another wakeup will fire when something relevant changes.");
-  return lines.join("\n");
+  lines.push("Before bidding: call `history` and use its cost learnings plus recent wake costs and task nets. Thinking tokens dominate. Reverse Vickrey auction: bid your true expected TOTAL cost plus margin; if you win, payment is second-lowest valid bid or reservation, not necessarily your bid. Underbidding only makes you win bad work. Goal: grow balance, not win auctions; don't work at a loss.");
+  lines.push("Cash discipline: your balance is debited after every model turn. Pick the single best profitable auction, place one bid, then stop; live wakes are cut off after a successful bid.");
+  return {
+    kind: "bid",
+    prompt: lines.join("\n"),
+    tools: ["list_tasks", "task_info", "place_bid", "my_balance", "history"],
+  };
 }
 
 let pretrainWakeCounter = 0;
 
-async function runPi(agent: string, prompt: string, tokens: TokenMap): Promise<{ usage: AgentUsage }> {
-  logPrefixed(`${agent}/wake-prompt`, prompt, magenta);
+async function runPi(agent: string, plan: WakePlan, tokens: TokenMap): Promise<{ usage: AgentUsage }> {
+  logPrefixed(`${agent}/wake-prompt`, plan.prompt, magenta);
   const token = tokens.byAgent.get(agent);
   if (!token) throw new Error(`no auth token for agent '${agent}'`);
+  setWakeScope(agent, { kind: plan.kind, taskId: plan.taskId });
   const proc = spawnAgent({
     agent,
-    prompt,
+    prompt: plan.prompt,
     model: process.env.AGENT_MODEL ?? "openrouter/deepseek/deepseek-v4-flash",
+    tools: plan.tools,
     authToken: token,
     runTag: `pt${++pretrainWakeCounter}`,
   });
 
-  // Avoid streaming stdout here. Bun 1.2.6 occasionally segfaults while
-  // iterating long docker stdout streams from pi JSON mode; reading the pipe
-  // as a single Response after process exit has been stable in reviewer paths.
-  const captured = await new Response(proc.stdout).text();
-  for (const line of captured.split("\n")) handlePiEvent(agent, line);
+  try {
+    // Avoid streaming stdout here. Bun 1.2.6 occasionally segfaults while
+    // iterating long docker stdout streams from pi JSON mode; reading the pipe
+    // as a single Response after process exit has been stable in reviewer paths.
+    const captured = await new Response(proc.stdout).text();
+    for (const line of captured.split("\n")) handlePiEvent(agent, line);
 
-  const stderr = await new Response(proc.stderr).text();
-  const code = await proc.exited;
-  if (code !== 0) console.error(red(`  [${agent}] pi exit ${code}: ${stderr.slice(0, 200)}`));
-  return { usage: extractUsage(captured) };
+    const stderr = await new Response(proc.stderr).text();
+    const code = await proc.exited;
+    if (code !== 0) console.error(red(`  [${agent}] pi exit ${code}: ${stderr.slice(0, 200)}`));
+    return { usage: extractUsage(captured) };
+  } finally {
+    clearWakeScope(agent);
+  }
 }
 
 /**
@@ -426,9 +464,9 @@ async function pretrainOne(
   // places a bid. Pretrain waits for the wake to finish, then settles
   // the auction immediately using whatever the agent bid.
   const biddingAt = new Date();
-  const biddingPrompt = await buildWakePrompt(agent);
+  const biddingPlan = await buildWakePlan(agent);
   console.log(brightMagenta(`  → bidding wake ${agent}`));
-  const { usage: bidUsage } = await runPi(agent, biddingPrompt, tokens);
+  const { usage: bidUsage } = await runPi(agent, biddingPlan, tokens);
   const bidCtx = await gatherWakeContext(agent, biddingAt);
   if (bidUsage.totalTokens > 0) {
     debit(ledger, agent, bidUsage.totalTokens, `Wakeup: ${bidUsage.totalTokens}tok ($${bidUsage.costUsd.toFixed(4)})`, biddingAt);
@@ -475,10 +513,10 @@ async function pretrainOne(
 
   for (let iter = 1; iter <= maxIters; iter++) {
     const at = new Date();
-    const prompt = await buildWakePrompt(agent);
+    const plan = await buildWakePlan(agent);
     console.log(brightMagenta(`  → work wake ${agent} (iter ${iter}/${maxIters})`));
 
-    const { usage } = await runPi(agent, prompt, tokens);
+    const { usage } = await runPi(agent, plan, tokens);
     const ctx = await gatherWakeContext(agent, at);
     if (usage.totalTokens > 0) {
       debit(ledger, agent, usage.totalTokens, `Wakeup: ${usage.totalTokens}tok ($${usage.costUsd.toFixed(4)})`, at);
@@ -527,7 +565,7 @@ async function pretrainOne(
       await recordEvent(
         agent,
         lgtmAt,
-        `task ${taskId} completed — paid ${summary.received}, cost ${totalCost} (thinking ${summary.thinking}, review fees ${summary.reviewFees}), net ${summary.net}`
+        `task ${taskId} completed — paid ${summary.received}, cost ${totalCost} (thinking ${summary.thinking}, review fees ${summary.reviewFees}), net ${summary.net}\n${formatFinancialOutcome(summary.net)}`
       );
       console.log(brightGreen(`  ${taskId}: LGTM → +${bid.price} to ${agent}`));
       lgtm = true;

@@ -42,6 +42,26 @@ async function dockerOk(args: string[]): Promise<boolean> {
   return (await proc.exited) === 0;
 }
 
+function spawnIgnore(args: string[]): void {
+  const proc = Bun.spawn(args, { stdout: "ignore", stderr: "ignore" });
+  void proc.exited.catch(() => {});
+}
+
+async function waitForExit(proc: ReturnType<typeof Bun.spawn>, timeoutMs: number, onTimeout: () => void): Promise<number> {
+  let timeout: ReturnType<typeof setTimeout> | undefined;
+  try {
+    const timedOut = new Promise<number>((resolve) => {
+      timeout = setTimeout(() => {
+        onTimeout();
+        resolve(-1);
+      }, timeoutMs);
+    });
+    return await Promise.race([proc.exited, timedOut]);
+  } finally {
+    if (timeout) clearTimeout(timeout);
+  }
+}
+
 async function containerExists(): Promise<boolean> {
   const proc = Bun.spawn(
     ["docker", "ps", "-a", "--filter", `name=^/${GATEWAY_NAME}$`, "--format", "{{.ID}}"],
@@ -87,7 +107,11 @@ export async function startGateway(): Promise<void> {
     GATEWAY_IMAGE,
     "sh", "-c", cmd,
   ], { stdout: "pipe", stderr: "pipe" });
-  const exit = await create.exited;
+  const exit = await waitForExit(create, 30_000, () => {
+    try { create.kill("SIGKILL"); } catch {}
+    spawnIgnore(["pkill", "-KILL", "-f", `--name ${GATEWAY_NAME}`]);
+    spawnIgnore(["docker", "rm", "-f", GATEWAY_NAME]);
+  });
   if (exit !== 0) {
     const err = await new Response(create.stderr).text();
     throw new Error(`gateway create failed: ${err.trim()}`);

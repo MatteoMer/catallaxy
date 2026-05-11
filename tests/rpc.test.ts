@@ -49,6 +49,44 @@ beforeAll(async () => {
       deadline_at: new Date(Date.now() + 60_000).toISOString(),
     })
   );
+  await writeFile(
+    `${workdir}/market/tasks/task-002.json`,
+    JSON.stringify({
+      id: "task-002",
+      description: "assigned task",
+      repo: "/tmp/repo",
+      base_branch: "main",
+      review_fee: 100,
+      deterministic_checks: [],
+      status: "assigned",
+      posted_by: "operator",
+      posted_at: new Date().toISOString(),
+      deadline_at: new Date(Date.now() + 60_000).toISOString(),
+    })
+  );
+  await writeFile(
+    `${workdir}/market/tasks/task-003.json`,
+    JSON.stringify({
+      id: "task-003",
+      description: "other assigned task",
+      repo: "/tmp/repo",
+      base_branch: "main",
+      review_fee: 100,
+      deterministic_checks: [],
+      status: "assigned",
+      posted_by: "operator",
+      posted_at: new Date().toISOString(),
+      deadline_at: new Date(Date.now() + 60_000).toISOString(),
+    })
+  );
+  await writeFile(
+    `${workdir}/market/assignments/task-002.json`,
+    JSON.stringify({ task_id: "task-002", winner: "alice", payment: 1000, assigned_at: new Date().toISOString() })
+  );
+  await writeFile(
+    `${workdir}/market/assignments/task-003.json`,
+    JSON.stringify({ task_id: "task-003", winner: "alice", payment: 1000, assigned_at: new Date().toISOString() })
+  );
 
   process.env.MARKET_DIR = `${workdir}/market`;
   process.env.AGENTS_DIR = `${workdir}/agents`;
@@ -163,6 +201,38 @@ describe("RPC end-to-end", () => {
   test("history returns the orchestrator-written log", async () => {
     const r = await rpc({ id: 10, method: "history", auth: aliceTok });
     expect(r.result.text).toContain("alice history line");
+  });
+
+  test("work wake scope hides other assignments and rejects other task actions", async () => {
+    const { setWakeScope, clearWakeScope } = await import("../orchestrator/rpc/methods");
+    setWakeScope("alice", { kind: "work", taskId: "task-002" });
+    try {
+      const assignments = await rpc({ id: 11, method: "my_assignments", auth: aliceTok });
+      expect(assignments.result.assignments.map((a: any) => a.task_id)).toEqual(["task-002"]);
+
+      const otherInfo = await rpc({
+        id: 12, method: "task_info", auth: aliceTok,
+        params: { task_id: "task-003" },
+      });
+      expect(otherInfo.error.message).toContain("scoped to task-002");
+
+      const otherVerdicts = await rpc({
+        id: 13, method: "task_verdicts", auth: aliceTok,
+        params: { task_id: "task-003" },
+      });
+      expect(otherVerdicts.error.message).toContain("scoped to task-002");
+
+      const list = await rpc({ id: 14, method: "list_tasks", auth: aliceTok });
+      expect(list.error.message).toContain("disabled during work wakes");
+
+      const bid = await rpc({
+        id: 15, method: "place_bid", auth: aliceTok,
+        params: { task_id: "task-001", price: 500 },
+      });
+      expect(bid.error.message).toContain("disabled during work wakes");
+    } finally {
+      clearWakeScope("alice");
+    }
   });
 
   test("connection-pinning: alice's token can't switch to bob mid-stream", async () => {
