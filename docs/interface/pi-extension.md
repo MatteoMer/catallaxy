@@ -1,6 +1,6 @@
 # Pi interface extension
 
-Catallaxy's user interface starts as a project-local Pi extension:
+Catallaxy's user interface is a project-local Pi extension:
 
 ```txt
 .pi/extensions/catallaxy-interface/index.ts
@@ -14,55 +14,72 @@ bin/catallaxy
 catallaxy
 ```
 
-The command captures the directory it was launched from as `CATALLAXY_USER_REPO`, then starts Pi from the Catallaxy root with `CATALLAXY_INTERFACE=1`. The project-local extension is inert unless that env var is set, so normal `pi` sessions in this repo are not forced into the Catallaxy intake flow.
+The command captures the launch directory as `CATALLAXY_USER_REPO`, then starts Pi from the Catallaxy root with `CATALLAXY_INTERFACE=1`. The extension is inert unless that env var is set.
 
-On startup, the extension replaces Pi's header with a procedural ASCII galaxy splash. It computes the current terminal center, places `catallaxy` there as plain text, and derives the star field from a seed.
+On startup, the extension replaces Pi's header with a procedural ASCII galaxy splash. The Pi session is the product interface: normal user messages are treated as Catallaxy campaign intake.
 
-The Pi session is the interface: the user chats with a buyer-interface agent until the demand is precise, then the extension creates an isolated git worktree of the user's repo, the agent writes tests/spec files there, and the extension posts a market task for Catallaxy implementation agents.
+## Campaign model
 
-When launched through `catallaxy`, users can type a demand directly; the extension routes normal input into demand intake. Direct file writes are locked until the user approves the test-first plan.
+Everything is a campaign. There is no separate “demand” or one-off task mode.
+
+The interface agent chooses the number of checkpoints while planning:
+
+- one checkpoint for atomic work
+- multiple checkpoints when the feature naturally needs reviewable/mergeable milestones
+
+Each checkpoint becomes one market task. After a checkpoint reaches LGTM, Catallaxy merges the winning agent branch into the campaign worktree, applies the next checkpoint's staged tests/files, and posts the next task automatically. Later checkpoint tasks include cumulative deterministic checks from prior checkpoints. Expired checkpoint tasks are reposted for the same checkpoint.
+
+When the final checkpoint completes, Catallaxy publishes the completed campaign back into the user's original checkout with a safe `git merge --ff-only <campaign-branch>`. This updates the files in the repo where the user launched `catallaxy` if that checkout is clean, still on the original branch, and has not diverged. If fast-forward publishing is not safe, the campaign is still completed and the final code remains in the campaign worktree; the publish error is recorded in `state.json`.
 
 ## Flow
 
-1. User starts intake either by typing normally:
+1. User types a normal request in `catallaxy`.
+2. The Pi agent clarifies acceptance behavior and inspects the repo as needed.
+3. The Pi agent creates a test-first campaign plan via `catallaxy_finalize_campaign_plan`.
+4. The extension shows the full campaign plan to the user for approval.
+5. After approval, the extension creates an isolated campaign worktree from the user's clean repo under `orchestrator/private/user-worktrees/...`.
+6. The Pi agent writes every planned checkpoint test/support file into private staging paths under:
 
    ```txt
-   build X
+   .catallaxy/campaigns/<campaign-id>/staging/<checkpoint-id>/<repo-relative-path>
    ```
 
-   or explicitly:
+7. The Pi agent calls `catallaxy_launch_campaign`.
+8. The extension copies checkpoint 1 staged files into the campaign worktree, commits them on the campaign base branch, and posts the first market task.
+9. The watcher advances the campaign on LGTM until all checkpoints complete, then fast-forwards the user's original checkout to the completed campaign branch when safe.
 
-   ```txt
-   /demand build X
-   ```
+Runtime state:
 
-2. The Pi agent asks clarifying questions until acceptance behavior is precise.
-3. The Pi agent creates a test-first demand plan via `catallaxy_finalize_demand_plan`.
-4. The extension shows the plan to the user for approval.
-5. Only after approval, the extension creates a clean git worktree from the user's repo under `orchestrator/private/user-worktrees/...`.
-6. The Pi agent writes the planned test files and supporting spec/fixture files inside that isolated worktree, not the user's original checkout.
-7. The Pi agent calls `catallaxy_launch_demand`.
-8. The extension commits the tests on the demand base branch, then writes Catallaxy market state relative to the Catallaxy root:
+```txt
+.catallaxy/campaigns/<campaign-id>/plan.json
+.catallaxy/campaigns/<campaign-id>/plan.md
+.catallaxy/campaigns/<campaign-id>/state.json
+.catallaxy/campaigns/<campaign-id>/staging/...
+market/tasks/task-NNN.json
+orchestrator/private/reservations.json
+```
 
-   ```txt
-   .catallaxy/demands/<demand-id>/plan.json
-   .catallaxy/demands/<demand-id>/plan.md
-   market/tasks/task-NNN.json
-   orchestrator/private/reservations.json
-   ```
+## Tools exposed to the Pi agent
 
-9. The normal Catallaxy watcher wakes implementation agents to bid/work. Agents clone the demand worktree and diff against the committed test-base branch.
+- `catallaxy_finalize_campaign_plan` — persist and approve the full checkpoint plan.
+- `catallaxy_launch_campaign` — validate all staged files exist and post checkpoint 1.
 
-## Why test-first
+## Approval gate
 
-The interface does not ask Catallaxy agents to infer what the user meant. It turns the user's demand into:
+Before the user approves the campaign plan:
 
-- deterministic tests/checks
-- explicit reviewer prompt/rubric
-- concise implementation prompt
-- private reservation economics
+- `write` and `edit` are blocked.
+- `catallaxy_launch_campaign` is blocked.
+- `bash` is restricted to read-only inspection commands.
 
-This keeps the market task objective enough for autonomous settlement while preserving the user's intent.
+After approval:
+
+- `write`/`edit` are allowed only for the exact staged file paths returned by `catallaxy_finalize_campaign_plan`.
+- mutating/test `bash` must explicitly operate inside campaign staging or the campaign worktree.
+- the original user checkout must be clean and is not mutated during planning/checkpoint execution.
+- on final campaign completion, the original checkout is updated only by a clean `git merge --ff-only` publish step.
+
+`catallaxy_launch_campaign` still asks for final interactive confirmation before posting.
 
 ## Launch command
 
@@ -70,38 +87,8 @@ This keeps the market task objective enough for autonomous settlement while pres
 bin/catallaxy [--seed NAME] [pi args...]
 ```
 
-This is intentionally a thin Pi launcher, not a replacement for the market/orchestrator commands. It records the current directory as the user repo, sets `CATALLAXY_INTERFACE=1`, changes cwd to the Catallaxy root, pre-paints the galaxy splash immediately, then execs `pi` with extension discovery disabled except for the Catallaxy interface extension.
-
 `--seed` / `--galaxy-seed` controls the procedural galaxy:
 
 ```sh
 bin/catallaxy --seed medieval-to-industrial
 ```
-
-## Pi commands
-
-```txt
-/demand <initial demand>  Explicitly start buyer intake mode
-/demand-off              Leave buyer intake mode
-```
-
-When launched through `catallaxy`, normal non-command input automatically starts buyer intake mode.
-
-## Tools exposed to the Pi agent
-
-- `catallaxy_finalize_demand_plan` — persist the test-first plan.
-- `catallaxy_launch_demand` — validate planned files exist and post the market task.
-
-## Approval gate
-
-Before the user approves the plan — including before `/demand` has explicitly been used:
-
-- `write` and `edit` are blocked.
-- `catallaxy_launch_demand` is blocked.
-- `bash` is restricted to read-only inspection commands.
-- normal user input is transformed into Catallaxy demand intake.
-- `catallaxy_finalize_demand_plan` asks for user approval before writing `.catallaxy/demands/<id>/plan.*`.
-
-After approval, write/edit and launch tools become available for the test-writing phase, but writes are allowed only inside the demand worktree. The original user checkout must be clean and is not mutated by the interface.
-
-`catallaxy_launch_demand` still asks for user confirmation in interactive Pi before posting.

@@ -51,7 +51,7 @@ export function splashHeight(rows: number): number {
 }
 
 export function computeGalaxyWindow(width: number, rows: number, title = GALAXY_TITLE): GalaxyWindow {
-  const w = clamp(Math.floor(Number.isFinite(width) ? width : 80), Math.max(24, title.length + 4), 220);
+  const w = Math.max(1, Math.floor(Number.isFinite(width) ? width : 80));
   const h = splashHeight(rows);
 
   // Center the galaxy on the current terminal window, not merely on the

@@ -11,9 +11,9 @@ test("catallaxy launcher starts quiet isolated pi session", async () => {
   expect(script).toContain("export PI_SKIP_VERSION_CHECK=1");
   expect(script).toContain("export CATALLAXY_GALAXY_SEED");
   expect(script).toContain("unset TMUX");
-  expect(script).toContain("bun bin/catallaxy-splash.ts");
+  expect(script).toContain("(cd \"$ROOT\" && bun bin/catallaxy-splash.ts)");
   expect(script).toContain("--no-extensions");
-  expect(script).toContain("-e .pi/extensions/catallaxy-interface/index.ts");
+  expect(script).toContain("-e \"$ROOT/.pi/extensions/catallaxy-interface/index.ts\"");
   expect(script).toContain("if [[ ${#args[@]} -gt 0 ]]");
 });
 

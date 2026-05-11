@@ -13,7 +13,7 @@ test("planning bash blocks mutations before approval", () => {
   expect(isSafePlanningBash("mkdir -p tests")).toBe(false);
   expect(isSafePlanningBash("cat > tests/foo.test.ts")).toBe(false);
   expect(isSafePlanningBash("touch x")).toBe(false);
-  expect(isSafePlanningBash("git checkout -b demand/foo")).toBe(false);
+  expect(isSafePlanningBash("git checkout -b campaign/foo")).toBe(false);
   expect(isSafePlanningBash("bun install")).toBe(false);
 });
 

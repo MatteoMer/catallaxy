@@ -7,6 +7,7 @@ repos/
 /tmp/
 
 # Runtime market state
+.catallaxy/
 market/bids/
 market/assignments/
 market/review_requests/

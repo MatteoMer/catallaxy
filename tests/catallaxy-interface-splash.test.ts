@@ -17,6 +17,14 @@ test("galaxy computes center from current window and places catallaxy there", ()
   expect(win.titleCol).toBe(Math.floor((80 - "catallaxy".length) / 2));
 });
 
+test("galaxy uses the full width on wide terminals", () => {
+  const win = computeGalaxyWindow(260, 32);
+  const lines = renderGalaxySplash(260, 32, "wide-screen");
+  expect(win.width).toBe(260);
+  expect(lines.every((line) => line.length === 260)).toBe(true);
+  expect(win.titleCol).toBe(Math.floor((260 - "catallaxy".length) / 2));
+});
+
 test("galaxy seed is deterministic and changes the star field", () => {
   const a1 = renderGalaxySplash(100, 36, "alpha").join("\n");
   const a2 = renderGalaxySplash(100, 36, "alpha").join("\n");

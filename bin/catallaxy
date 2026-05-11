@@ -3,7 +3,6 @@ set -euo pipefail
 
 USER_REPO="$(pwd)"
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-cd "$ROOT"
 
 args=()
 while [[ $# -gt 0 ]]; do
@@ -40,7 +39,7 @@ unset TMUX
 # runtime/extensions; this makes startup feel instant and Pi then overwrites
 # the same canvas with the live extension header.
 if command -v bun >/dev/null 2>&1; then
-  bun bin/catallaxy-splash.ts || printf '\033[2J\033[3J\033[H'
+  (cd "$ROOT" && bun bin/catallaxy-splash.ts) || printf '\033[2J\033[3J\033[H'
 else
   printf '\033[2J\033[3J\033[H'
 fi
@@ -50,7 +49,7 @@ pi_args=(
   --no-skills
   --no-prompt-templates
   --no-extensions
-  -e .pi/extensions/catallaxy-interface/index.ts
+  -e "$ROOT/.pi/extensions/catallaxy-interface/index.ts"
 )
 if [[ ${#args[@]} -gt 0 ]]; then
   pi_args+=("${args[@]}")
