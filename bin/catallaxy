@@ -1,0 +1,57 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+USER_REPO="$(pwd)"
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+
+args=()
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --seed|--galaxy-seed)
+      if [[ $# -lt 2 ]]; then
+        echo "catallaxy: $1 requires a value" >&2
+        exit 2
+      fi
+      export CATALLAXY_GALAXY_SEED="$2"
+      shift 2
+      ;;
+    --seed=*|--galaxy-seed=*)
+      export CATALLAXY_GALAXY_SEED="${1#*=}"
+      shift
+      ;;
+    *)
+      args+=("$1")
+      shift
+      ;;
+  esac
+done
+
+export CATALLAXY_INTERFACE=1
+export CATALLAXY_ROOT="$ROOT"
+export CATALLAXY_USER_REPO="$USER_REPO"
+export PI_OFFLINE=1
+export PI_SKIP_VERSION_CHECK=1
+# Pi warns inside tmux when extended-keys is disabled. Catallaxy owns this
+# interface session and does not need that startup diagnostic.
+unset TMUX
+
+# Paint the splash before Pi starts. Pi startup can spend ~1-2s loading the
+# runtime/extensions; this makes startup feel instant and Pi then overwrites
+# the same canvas with the live extension header.
+if command -v bun >/dev/null 2>&1; then
+  (cd "$ROOT" && bun bin/catallaxy-splash.ts) || printf '\033[2J\033[3J\033[H'
+else
+  printf '\033[2J\033[3J\033[H'
+fi
+
+pi_args=(
+  --no-context-files
+  --no-skills
+  --no-prompt-templates
+  --no-extensions
+  -e "$ROOT/.pi/extensions/catallaxy-interface/index.ts"
+)
+if [[ ${#args[@]} -gt 0 ]]; then
+  pi_args+=("${args[@]}")
+fi
+exec pi "${pi_args[@]}"

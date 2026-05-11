@@ -4,7 +4,7 @@
  * Removes:
  *   - market/{tasks,bids,assignments,review_requests,review_responses}
  *   - agents/{name}/{memory,work,balance.json}
- *   - orchestrator/{ledger.json,private/} (history, audit logs, campaign/reopen state)
+ *   - orchestrator/{ledger.json,private/} and .catallaxy/ (history, audit logs, campaign/reopen state)
  *   - running watcher/campaign/reopen processes and agent containers
  *   - playground branches other than main, untracked files inside the repo
  *
@@ -110,6 +110,7 @@ async function resetAgents(): Promise<void> {
 async function resetOrchestrator(): Promise<void> {
   await rmrf(`${ROOT}/orchestrator/ledger.json`);
   await rmrf(`${ROOT}/orchestrator/private`);
+  await rmrf(`${ROOT}/.catallaxy`);
   // History was previously written into agents/{name}/sandbox/memory/history.md.
   // Stale copies could mislead agents; resetAgents() already wipes them but
   // we keep this comment as a breadcrumb for future archaeology.

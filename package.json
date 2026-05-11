@@ -3,7 +3,11 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
+  "bin": {
+    "catallaxy": "./bin/catallaxy"
+  },
   "scripts": {
+    "interface": "bin/catallaxy",
     "watch": "make image-if-needed && bun orchestrator/watch-live.ts",
     "exchange": "bun orchestrator/exchange.ts",
     "ledger": "bun orchestrator/ledger.ts",

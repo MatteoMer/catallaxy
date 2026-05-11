@@ -36,6 +36,7 @@ import { dim, gray, cyan, magenta, brightMagenta, yellow, brightYellow, red, bri
 import { renderMarkdownTables } from "./markdown";
 import { logEvent } from "./events";
 import { clearWakeScope, setWakeScope } from "./rpc/methods";
+import { advanceCampaigns } from "../.pi/extensions/catallaxy-interface/task";
 
 const AGENTS_DIR = process.env.AGENTS_DIR ?? "./agents";
 const MARKET = process.env.MARKET_DIR ?? "./market";
@@ -727,6 +728,7 @@ async function main() {
       try {
         await processReviewRequests(ledger, seenReviewRequests, tokens.byAgent.get(REVIEWER_PRINCIPAL)!);
         await persist();
+        await handleAdvancedCampaigns(await advanceCampaigns(process.cwd()));
       } catch (e) {
         console.error("processReviewRequests error:", e);
       }
@@ -856,6 +858,12 @@ async function main() {
     }
 
     try {
+      await handleAdvancedCampaigns(await advanceCampaigns(process.cwd()));
+    } catch (e) {
+      console.error("advanceCampaigns error:", e);
+    }
+
+    try {
       const r = await reopenUnsolvableAssignments(ledger);
       if (r.reopened.length > 0) {
         console.log(brightYellow(`Reopened bankrupt assignment(s): ${r.reopened.join(", ")}`));
@@ -884,6 +892,22 @@ async function main() {
     }, ms);
     deadlineTimers.set(task.id, t);
     console.log(dim(`scheduled settle for ${task.id} ${formatRelative(new Date(), new Date(task.deadline_at))}`));
+  };
+
+  const handleAdvancedCampaigns = async (advanced: Awaited<ReturnType<typeof advanceCampaigns>>): Promise<void> => {
+    if (!(advanced.posted.length || advanced.reposted.length || advanced.merged.length || advanced.completedCampaigns.length || advanced.publishedCampaigns.length || advanced.publishFailed.length)) return;
+    console.log(green(`campaign advance: posted ${advanced.posted.length}, reposted ${advanced.reposted.length}, merged ${advanced.merged.length}, completed ${advanced.completedCampaigns.length}, published ${advanced.publishedCampaigns.length}, publish_failed ${advanced.publishFailed.length}`));
+
+    const newTaskIds = [...advanced.posted, ...advanced.reposted];
+    for (const taskId of newTaskIds) {
+      const task = await readJsonOrNull(`${MARKET}/tasks/${taskId}.json`, TaskSchema);
+      if (task) scheduleDeadline(task);
+    }
+    if (newTaskIds.length > 0) {
+      for (const a of aliveAgents(ledger).filter((n) => agentNames.includes(n))) {
+        triggerWake(a, false);
+      }
+    }
   };
 
   // Watcher infrastructure
