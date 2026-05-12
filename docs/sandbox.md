@@ -4,22 +4,23 @@ This document describes how agents are isolated in production. The
 threat model: an agent's `pi` may be compromised by prompt injection,
 model malice, or hallucination. After the rollout below, an agent
 must be unable to (a) read/write any file outside its own sandbox,
-(b) reach any network endpoint other than OpenRouter, (c) read or
-guess the OpenRouter key, (d) interfere with peer agents or the
-orchestrator.
+(b) reach any network endpoint other than model APIs and explicitly
+allowlisted package registry/CDN hosts, (c) read or guess upstream API
+keys, (d) interfere with peer agents or the orchestrator.
 
 ## Layout
 
 ```
 host
 ├── orchestrator (bun)
-│   ├── RPC server (TCP, one port per agent, base 9443)
-│   ├── Egress proxy (HTTP, one port per agent, base 8443)
+│   ├── RPC server (TCP :9443)
+│   ├── Egress proxy (HTTP :8443)
 │   ├── Reviewer (claude -p, stays on host)
 │   └── Container manager (docker run per wake)
 └── agent containers (docker)
-    └── pi → catallaxy tools via host.docker.internal:{rpc_port}
-         → OpenRouter via host.docker.internal:{proxy_port}
+    └── pi → catallaxy tools via catallaxy-gateway:9443
+         → OpenRouter/Anthropic via catallaxy-gateway:8443
+         → npm package egress via authenticated CONNECT proxy on the same port
 ```
 
 ## What's mounted into an agent container
@@ -33,7 +34,7 @@ Read-write:
 Read-only:
 
 - `/pi-config/models.json` — pi's `models.json` redirecting the
-  openrouter provider to `http://host.docker.internal:{proxy_port}/api/v1`.
+  openrouter provider to `http://catallaxy-gateway:{proxy_port}/openrouter/api/v1`.
 - `/pi-config/auth.json` and `/pi-config/settings.json` — pre-created
   empty stubs so pi's startup paths don't try to mkdir/write into a
   read-only mount.
@@ -58,38 +59,44 @@ Read-only:
 - `--security-opt apparmor=docker-default` (Linux)
 - `--read-only` root, `tmpfs` for `/tmp` (100 MB) and
   `/home/catallaxy` (20 MB)
-- `--memory=2g --cpus=1 --pids-limit=128`
-- `--network catallaxy-agents` — a dedicated bridge that egresses
-  through the host but only the proxy port is reachable for the
-  external API surface
+- `--memory=2g --cpus=1 --pids-limit=512`
+- `--network catallaxy-agents` — an internal bridge with no direct
+  host or internet route. Agents can only reach `catallaxy-gateway`,
+  which forwards RPC and proxy ports to the host.
 
 ## Egress proxy
 
-`orchestrator/proxy/server.ts` runs one HTTP listener per agent on
-`8443 + index`. Pi inside the container is configured (via the
-mounted `models.json`) to use this listener as its OpenAI-compatible
-baseUrl. The proxy:
+`orchestrator/proxy/server.ts` runs one HTTP listener on
+`CATALLAXY_PROXY_PORT` (default `8443`). Pi inside the container is
+configured (via the mounted `models.json`) to use this listener as its
+OpenAI-compatible baseUrl. The proxy:
 
-1. Allowlists OpenRouter API paths (`/api/v1/{chat/completions,
-   messages, models, completions, embeddings}`).
-2. Strips the incoming `Authorization` header (the agent's dummy key).
-3. Injects the orchestrator's real OpenRouter key from
-   `OPENROUTER_API_KEY` or `orchestrator/private/openrouter.key`.
-4. Forwards to `https://openrouter.ai/api/v1/...`.
+1. Authenticates every request with the per-agent catallaxy token.
+2. Allowlists model API paths under `/openrouter/...` and `/anthropic/...`.
+3. Strips caller-supplied upstream auth headers.
+4. Injects host-side upstream keys from env or `orchestrator/private/*.key`.
 5. Streams the response back unchanged.
 6. Audits each call to `orchestrator/private/audit/proxy-{agent}.jsonl`.
 
-CONNECT (HTTPS tunneling) is rejected. End-to-end TLS would defeat
-key injection.
+CONNECT is enabled only for package-manager HTTPS egress. Agent
+containers get `HTTPS_PROXY=http://catallaxy:<token>@catallaxy-gateway:8443`
+and npm cache dirs under `/sandbox/.cache/...`. The proxy accepts
+`Proxy-Authorization`, only permits port `443`, and only tunnels to
+`CATALLAXY_CONNECT_ALLOWLIST` / `CATALLAXY_PACKAGE_EGRESS_HOSTS`
+(comma-separated exact hosts or `*.example.com` wildcards; default: npm
+registry plus common Prisma/Playwright binary CDNs).
+CONNECT has a separate rate limit (`CATALLAXY_CONNECT_RATE_LIMIT`,
+default 1200/min) so large installs do not trip the model API limit.
+Model traffic never uses CONNECT, so upstream key injection remains
+intact.
 
 ## RPC server
 
-`orchestrator/rpc/server.ts` listens on `0.0.0.0:9443+i` (one port
-per agent). The container resolves `host.docker.internal` to the
-host and connects via `CATALLAXY_RPC_ADDR=host.docker.internal:{port}`
-which the orchestrator passes in via -e. Identity is implicit:
-whichever port a connection arrived on determines the calling agent
-— agent names in request payloads are ignored.
+`orchestrator/rpc/server.ts` listens on `0.0.0.0:9443`. The gateway
+forwards `catallaxy-gateway:9443` to the host listener and the agent
+connects via `CATALLAXY_RPC_ADDR=catallaxy-gateway:9443`, passed in
+via `-e`. Identity comes from the first-frame catallaxy auth token;
+agent names in request payloads are ignored.
 
 (Unix sockets would have been simpler, but Docker Desktop on macOS
 does not bridge them across the host↔Linux-VM boundary; `connect()`
@@ -138,9 +145,11 @@ docker exec -it catallaxy-agent-bob-pt1 sh
 cat /sandbox/SYSTEM.md           # works
 cat /orchestrator/ledger.json    # ENOENT
 ls /agents                       # ENOENT
-env | grep -iE 'key|token'       # empty
-curl http://host.docker.internal:8443/api/v1/models  # works (proxied)
-curl https://api.openrouter.ai/api/v1/models         # 403 (no DNS, but path forbidden via proxy)
+env | grep -iE 'OPENROUTER|ANTHROPIC'  # empty
+npm view zod version                    # works through authenticated CONNECT proxy
+curl https://example.com                 # 403 via proxy allowlist, or no route if proxy env is unset
+curl -H "Authorization: Bearer $CATALLAXY_AUTH_TOKEN" \
+  http://catallaxy-gateway:8443/openrouter/api/v1/models      # works
 ```
 
 The agent's audit log (`orchestrator/private/audit/bob.jsonl`) shows

@@ -1,5 +1,6 @@
 import { describe, expect, test, beforeAll, afterAll } from "bun:test";
 import { createServer, type Server } from "node:http";
+import { connect as netConnect } from "node:net";
 import { generateTokens, REVIEWER_PRINCIPAL } from "../orchestrator/auth";
 
 // Stand up a fake "openrouter.ai" / "api.anthropic.com" inside the
@@ -63,6 +64,21 @@ describe("proxy auth + path validation (unit, no network)", () => {
 // to fake the upstream HTTPS without a cert, so we only exercise
 // the EARLY-RETURN paths (401 unauth, 403 forbidden path) — those
 // don't reach the upstream.
+function rawProxyRequest(port: number, payload: string): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const sock = netConnect(port, "127.0.0.1", () => sock.write(payload));
+    let out = "";
+    sock.setEncoding("utf8");
+    sock.on("data", (chunk) => { out += chunk; });
+    sock.on("error", reject);
+    sock.on("end", () => resolve(out));
+    sock.setTimeout(2_000, () => {
+      sock.destroy();
+      resolve(out);
+    });
+  });
+}
+
 describe("proxy server early-return paths", () => {
   let port: number;
   let stop: () => Promise<void>;
@@ -123,5 +139,24 @@ describe("proxy server early-return paths", () => {
     });
     // 403 (auth passed, path forbidden), NOT 401
     expect(r.status).toBe(403);
+  });
+
+  test("CONNECT requires proxy auth", async () => {
+    const resp = await rawProxyRequest(port,
+      "CONNECT registry.npmjs.org:443 HTTP/1.1\r\n" +
+      "Host: registry.npmjs.org:443\r\n\r\n"
+    );
+    expect(resp.startsWith("HTTP/1.1 401")).toBe(true);
+  });
+
+  test("CONNECT accepts Basic Proxy-Authorization but enforces host allowlist", async () => {
+    const basic = Buffer.from(`catallaxy:${aliceTok}`).toString("base64");
+    const resp = await rawProxyRequest(port,
+      "CONNECT example.com:443 HTTP/1.1\r\n" +
+      "Host: example.com:443\r\n" +
+      `Proxy-Authorization: Basic ${basic}\r\n\r\n`
+    );
+    // 403 (auth passed, host forbidden), NOT 401
+    expect(resp.startsWith("HTTP/1.1 403")).toBe(true);
   });
 });

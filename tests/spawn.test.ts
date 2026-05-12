@@ -50,6 +50,18 @@ describe("spawnAgent argument construction", () => {
     expect(envFlags.some((e) => e.startsWith("ANTHROPIC_API_KEY="))).toBe(false);
   });
 
+  test("docker args configure authenticated package-manager egress", () => {
+    const args = buildDockerArgs(opts, buildPiArgs(opts));
+    const envFlags = args.filter((_, i) => i > 0 && args[i - 1] === "-e");
+    const proxy = `http://catallaxy:${opts.authToken}@catallaxy-gateway:8443`;
+    expect(envFlags).toContain(`HTTPS_PROXY=${proxy}`);
+    expect(envFlags).toContain(`NPM_CONFIG_HTTPS_PROXY=${proxy}`);
+    expect(envFlags).toContain("NO_PROXY=catallaxy-gateway,localhost,127.0.0.1");
+    expect(envFlags).toContain("NPM_CONFIG_CACHE=/sandbox/.cache/npm");
+    // Do not set HTTP_PROXY: pi's model baseUrl is plain HTTP to the gateway.
+    expect(envFlags.some((e) => e.startsWith("HTTP_PROXY="))).toBe(false);
+  });
+
   test("docker args mount sandbox rw, pi-config ro", () => {
     const args = buildDockerArgs(opts, buildPiArgs(opts));
     const mounts = args.filter((_, i) => i > 0 && args[i - 1] === "-v");

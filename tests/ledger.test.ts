@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { formatFinancialOutcome, summarizeTaskSettlement, type Ledger } from "../orchestrator/ledger";
+import { billableTokensForUsage, formatFinancialOutcome, summarizeTaskSettlement, tokenAccountingRatiosForModel, usageFromPiUsage, type Ledger } from "../orchestrator/ledger";
 
 test("task settlement summary uses exact task-addressed paid/review entries", () => {
   const ledger: Ledger = {
@@ -28,4 +28,49 @@ test("financial outcome labels losses as bad and wins as positive net", () => {
   expect(formatFinancialOutcome(-5)).toContain("Financial outcome: LOSS -5 — BAD");
   expect(formatFinancialOutcome(7)).toContain("Financial outcome: WIN +7");
   expect(formatFinancialOutcome(0)).toContain("BREAK-EVEN 0 — not good");
+});
+
+test("token accounting discounts cache reads and keeps cache writes at input weight", () => {
+  expect(billableTokensForUsage({
+    inputTokens: 100,
+    outputTokens: 50,
+    cacheReadTokens: 1_000,
+    cacheWriteTokens: 200,
+  })).toBe(450);
+
+  const u = usageFromPiUsage({
+    input: 10,
+    output: 1,
+    cacheRead: 99,
+    cacheWrite: 5,
+    totalTokens: 115,
+    cost: { total: 0.123 },
+  });
+  expect(u.totalTokens).toBe(115);
+  expect(u.billableTokens).toBe(26);
+  expect(u.cacheWriteTokens).toBe(5);
+});
+
+test("token accounting ratios can be overridden by model", () => {
+  const old = process.env.CATALLAXY_MODEL_TOKEN_RATIOS;
+  process.env.CATALLAXY_MODEL_TOKEN_RATIOS = JSON.stringify({
+    "openrouter/test/model": { output: 4, cacheRead: 0.25, cacheWrite: 1 },
+  });
+  try {
+    expect(tokenAccountingRatiosForModel("openrouter/test/model")).toEqual({
+      input: 1,
+      output: 4,
+      cacheRead: 0.25,
+      cacheWrite: 1,
+    });
+    expect(billableTokensForUsage({
+      inputTokens: 100,
+      outputTokens: 10,
+      cacheReadTokens: 100,
+      cacheWriteTokens: 0,
+    }, "openrouter/test/model")).toBe(165);
+  } finally {
+    if (old === undefined) delete process.env.CATALLAXY_MODEL_TOKEN_RATIOS;
+    else process.env.CATALLAXY_MODEL_TOKEN_RATIOS = old;
+  }
 });

@@ -10,10 +10,13 @@
  *   - task_info       full details of one task
  *   - place_bid       place / update a bid
  *   - request_review  ask the reviewer to look at your branch
+ *   - create_task     create an agent-funded normal market task
+ *   - my_created_tasks / cancel_created_task / merge_task_result
  *   - my_assignments  list tasks you've won and not yet completed
  *   - task_verdicts   show review verdicts you've received for a task
  *   - my_balance      show your current token balance
  *   - history         read your append-only history log (orchestrator-written)
+ *   - memory_*        private persistent memory tools scoped to /sandbox/memory
  *
  * All tools talk to the orchestrator over a Unix-domain socket — they
  * have no direct filesystem access to market state. Identity is
@@ -22,11 +25,11 @@
  */
 
 import { Type } from "@mariozechner/pi-ai";
-import { defineTool, type ExtensionAPI } from "@mariozechner/pi-coding-agent";
+import { createEditTool, createReadTool, createWriteTool, defineTool, type ExtensionAPI } from "@mariozechner/pi-coding-agent";
 import { spawn } from "node:child_process";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { lstat, mkdir, mkdtemp, readdir, rm, unlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, relative } from "node:path";
 import { connect } from "node:net";
 
 /**
@@ -131,18 +134,20 @@ interface AgentUsage {
   inputTokens: number;
   outputTokens: number;
   cacheReadTokens: number;
+  cacheWriteTokens: number;
   totalTokens: number;
   costUsd: number;
 }
 
 function emptyUsage(): AgentUsage {
-  return { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, totalTokens: 0, costUsd: 0 };
+  return { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, totalTokens: 0, costUsd: 0 };
 }
 
 function addUsage(a: AgentUsage, b: AgentUsage): void {
   a.inputTokens += b.inputTokens;
   a.outputTokens += b.outputTokens;
   a.cacheReadTokens += b.cacheReadTokens;
+  a.cacheWriteTokens += b.cacheWriteTokens;
   a.totalTokens += b.totalTokens;
   a.costUsd += b.costUsd;
 }
@@ -154,6 +159,7 @@ function usageFromTurnEnd(ev: any): AgentUsage | null {
     inputTokens: u.input ?? 0,
     outputTokens: u.output ?? 0,
     cacheReadTokens: u.cacheRead ?? 0,
+    cacheWriteTokens: u.cacheWrite ?? 0,
     totalTokens: u.totalTokens ?? 0,
     costUsd: u.cost?.total ?? 0,
   };
@@ -441,6 +447,84 @@ const requestReviewTool = defineTool({
   },
 });
 
+const createTaskTool = defineTool({
+  name: "create_task",
+  label: "Create funded task",
+  description: "Create a normal market task funded from your own balance. The reservation/max_payment is escrowed immediately from your balance. Workers pay their own review fees. When the task completes, unused escrow is refunded to you. For subtasks, create from a source assignment worktree; commit source changes first.",
+  parameters: Type.Object({
+    description: Type.String({ description: "Task description and acceptance requirements" }),
+    max_payment: Type.Integer({ minimum: 1, description: "Maximum payment/reservation to escrow from your balance" }),
+    source_task_id: Type.Optional(Type.String({ description: "Assignment task id whose worktree is the repo source; defaults to current work task during WORK wakes" })),
+    base_branch: Type.Optional(Type.String({ description: "Base branch in the source worktree; defaults to current branch" })),
+    review_fee: Type.Optional(Type.Integer({ minimum: 1, description: "Review fee paid by worker per review request (default 2000)" })),
+    deadline_minutes: Type.Optional(Type.Integer({ minimum: 1, description: "Auction duration in minutes (default 5)" })),
+    subjective_criteria: Type.Optional(Type.String({ description: "Subjective review criteria" })),
+    deterministic_checks: Type.Optional(Type.Array(Type.String({ description: "Command that must pass; repeat for multiple checks" }))),
+  }),
+  async execute(_id, params) {
+    const { task, escrow, warnings } = await rpc().call("create_task", {
+      description: params.description,
+      reservation: params.max_payment,
+      source_task_id: params.source_task_id,
+      base_branch: params.base_branch,
+      review_fee: params.review_fee,
+      deadline_minutes: params.deadline_minutes,
+      subjective_criteria: params.subjective_criteria,
+      deterministic_checks: params.deterministic_checks,
+    });
+    const lines = [
+      `created task ${task.id}; escrowed ${escrow.amount}; deadline ${task.deadline_at}`,
+      `parent/source: ${task.parent_task_id ?? "none"}; base_branch: ${task.base_branch}`,
+    ];
+    for (const w of warnings ?? []) lines.push(`warning: ${w}`);
+    return { content: [{ type: "text", text: lines.join("\n") }], details: { task, escrow, warnings } };
+  },
+});
+
+const myCreatedTasksTool = defineTool({
+  name: "my_created_tasks",
+  label: "My created tasks",
+  description: "List normal market tasks you created/funded, including private escrow remaining.",
+  parameters: Type.Object({}),
+  async execute() {
+    const { tasks } = await rpc().call("my_created_tasks");
+    if (!tasks.length) return { content: [{ type: "text", text: "No created tasks." }], details: { count: 0 } };
+    const lines = ["Your created tasks:"];
+    for (const t of tasks) {
+      lines.push(`- ${t.id} (${t.status}) parent=${t.parent_task_id ?? "none"} escrow=${t.escrow_remaining}/${t.escrow_amount} deadline=${t.deadline_at} | ${t.description}`);
+    }
+    return { content: [{ type: "text", text: lines.join("\n") }], details: { count: tasks.length, tasks } };
+  },
+});
+
+const cancelCreatedTaskTool = defineTool({
+  name: "cancel_created_task",
+  label: "Cancel created task",
+  description: "Cancel one open unassigned task you created and refund its escrow. Assigned/completed tasks cannot be cancelled.",
+  parameters: Type.Object({
+    task_id: Type.String({ description: "Created task id to cancel" }),
+  }),
+  async execute(_id, params) {
+    const result = await rpc().call("cancel_created_task", { task_id: params.task_id });
+    return { content: [{ type: "text", text: `cancelled ${result.task_id}; refunded ${result.refunded}` }], details: result };
+  },
+});
+
+const mergeTaskResultTool = defineTool({
+  name: "merge_task_result",
+  label: "Merge created task result",
+  description: "Merge the LGTM branch from a completed task you created into your current assignment worktree. Commit your own current work before calling. If git reports conflicts, resolve them manually.",
+  parameters: Type.Object({
+    task_id: Type.String({ description: "Completed created task id to merge" }),
+    into_task_id: Type.Optional(Type.String({ description: "Your assignment task to merge into; defaults to current WORK task" })),
+  }),
+  async execute(_id, params) {
+    const result = await rpc().call("merge_task_result", { task_id: params.task_id, into_task_id: params.into_task_id });
+    const text = `merged ${result.task_id} (${result.branch}) into ${result.into_task_id}\n${result.stdout}${result.stderr}`.trim();
+    return { content: [{ type: "text", text }], details: result };
+  },
+});
+
 const myAssignmentsTool = defineTool({
   name: "my_assignments",
   label: "My assignments",
@@ -493,6 +577,179 @@ const historyTool = defineTool({
   },
 });
 
+const MEMORY_KEY_MAX_CHARS = Math.max(16, parseInt(process.env.CATALLAXY_MEMORY_KEY_MAX_CHARS ?? "160", 10) || 160);
+const MEMORY_WRITE_MAX_BYTES = Math.max(256, parseInt(process.env.CATALLAXY_MEMORY_WRITE_MAX_BYTES ?? "32768", 10) || 32768);
+const MEMORY_LIST_MAX_ITEMS = Math.max(1, parseInt(process.env.CATALLAXY_MEMORY_LIST_MAX_ITEMS ?? "200", 10) || 200);
+
+type MemoryItem = { key: string; bytes: number; updated_at: string };
+
+function validateMemoryKey(value: unknown): string {
+  if (typeof value !== "string") throw new Error("key required");
+  const key = value.trim();
+  if (!key) throw new Error("key required");
+  if (key.length > MEMORY_KEY_MAX_CHARS) throw new Error(`key too long; max ${MEMORY_KEY_MAX_CHARS} chars`);
+  if (key.startsWith("/") || key.includes("\\")) throw new Error("invalid memory key");
+  if (!/^[A-Za-z0-9._/-]+$/.test(key)) throw new Error("invalid memory key; use letters, digits, '.', '_', '-', '/' only");
+  const parts = key.split("/");
+  if (parts.some((p) => !p || p === "." || p === "..")) throw new Error("invalid memory key path");
+  return key;
+}
+
+function memoryRelPath(key: string): string {
+  return `memory/${key}`;
+}
+
+function memoryRoot(cwd: string): string {
+  return join(cwd, "memory");
+}
+
+function memoryAbsPath(cwd: string, key: string): string {
+  const root = memoryRoot(cwd);
+  const path = join(root, key);
+  const rel = relative(root, path);
+  if (!rel || rel.startsWith("..")) throw new Error("invalid memory key path");
+  return path;
+}
+
+async function assertSafeMemoryAncestors(cwd: string, key: string): Promise<void> {
+  const root = memoryRoot(cwd);
+  await mkdir(root, { recursive: true });
+  const rootSt = await lstat(root);
+  if (rootSt.isSymbolicLink() || !rootSt.isDirectory()) throw new Error("invalid memory root");
+
+  let cur = root;
+  for (const part of key.split("/").slice(0, -1)) {
+    cur = join(cur, part);
+    let st;
+    try { st = await lstat(cur); } catch (e: any) {
+      if (e?.code === "ENOENT") break;
+      throw e;
+    }
+    if (st.isSymbolicLink()) throw new Error("memory path contains a symlink");
+    if (!st.isDirectory()) throw new Error("memory path parent is not a directory");
+  }
+}
+
+async function listMemoryItems(cwd: string, dir = memoryRoot(cwd), prefix = ""): Promise<MemoryItem[]> {
+  let entries;
+  try { entries = await readdir(dir, { withFileTypes: true }); } catch { return []; }
+  const out: MemoryItem[] = [];
+  for (const ent of entries) {
+    const key = prefix ? `${prefix}/${ent.name}` : ent.name;
+    try { validateMemoryKey(key); } catch { continue; }
+    const path = join(dir, ent.name);
+    let st;
+    try { st = await lstat(path); } catch { continue; }
+    if (st.isSymbolicLink()) continue;
+    if (st.isDirectory()) out.push(...await listMemoryItems(cwd, path, key));
+    else if (st.isFile()) out.push({ key, bytes: st.size, updated_at: st.mtime.toISOString() });
+  }
+  out.sort((a, b) => a.key.localeCompare(b.key));
+  return out;
+}
+
+const memoryListTool = defineTool({
+  name: "memory_list",
+  label: "List memory",
+  description: "List your private persistent memory keys and sizes. Does not return memory contents. Use this to decide what to read or edit.",
+  parameters: Type.Object({}),
+  async execute(_id, _params, _signal, _onUpdate, ctx) {
+    const allItems = await listMemoryItems(ctx.cwd);
+    const totalBytes = allItems.reduce((sum, item) => sum + item.bytes, 0);
+    const items = allItems.slice(0, MEMORY_LIST_MAX_ITEMS);
+    if (!items.length) return { content: [{ type: "text", text: "Memory empty." }], details: { items, total_bytes: 0, count: 0, truncated: false } };
+    const lines = [`Memory (${totalBytes} bytes):`];
+    for (const item of items) lines.push(`- ${item.key} | ${item.bytes} bytes | updated ${item.updated_at}`);
+    if (allItems.length > items.length) lines.push(`[truncated: ${allItems.length} total items]`);
+    return { content: [{ type: "text", text: lines.join("\n") }], details: { items, total_bytes: totalBytes, count: allItems.length, truncated: allItems.length > items.length } };
+  },
+});
+
+const memoryReadTool = defineTool({
+  name: "memory_read",
+  label: "Read memory",
+  description: "Read one private persistent memory file. Uses pi's built-in read implementation, scoped to /sandbox/memory.",
+  parameters: Type.Object({
+    key: Type.String({ description: "Memory key, e.g. 'core.md', 'costs.jsonl', or 'bidding.md'" }),
+    offset: Type.Optional(Type.Number({ description: "Line number to start reading from (1-indexed)" })),
+    limit: Type.Optional(Type.Number({ description: "Maximum number of lines to read" })),
+  }),
+  async execute(id, params, signal, onUpdate, ctx) {
+    const key = validateMemoryKey(params.key);
+    await assertSafeMemoryAncestors(ctx.cwd, key);
+    const tool = createReadTool(ctx.cwd);
+    return tool.execute(id, { path: memoryRelPath(key), offset: params.offset, limit: params.limit }, signal, onUpdate, ctx);
+  },
+});
+
+const memoryWriteTool = defineTool({
+  name: "memory_write",
+  label: "Write memory",
+  description: "Create or overwrite one private persistent memory file. Uses pi's built-in write implementation, scoped to /sandbox/memory.",
+  parameters: Type.Object({
+    key: Type.String({ description: "Memory key, e.g. 'core.md', 'costs.jsonl', or 'bidding.md'" }),
+    content: Type.String({ description: "Content to write" }),
+  }),
+  async execute(id, params, signal, onUpdate, ctx) {
+    const key = validateMemoryKey(params.key);
+    const bytes = Buffer.byteLength(params.content, "utf-8");
+    if (bytes > MEMORY_WRITE_MAX_BYTES) throw new Error(`content too large; max write is ${MEMORY_WRITE_MAX_BYTES} bytes`);
+    await assertSafeMemoryAncestors(ctx.cwd, key);
+    const tool = createWriteTool(ctx.cwd);
+    return tool.execute(id, { path: memoryRelPath(key), content: params.content }, signal, onUpdate, ctx);
+  },
+});
+
+const memoryEditTool = defineTool({
+  name: "memory_edit",
+  label: "Edit memory",
+  description: "Edit one private persistent memory file using pi's exact text replacement semantics, scoped to /sandbox/memory. Every oldText must match a unique non-overlapping region. Use newText='' to delete text.",
+  parameters: Type.Object({
+    key: Type.String({ description: "Memory key to edit" }),
+    edits: Type.Array(Type.Object({
+      oldText: Type.String({ description: "Exact text to replace; must be unique" }),
+      newText: Type.String({ description: "Replacement text; empty string deletes oldText" }),
+    })),
+  }),
+  prepareArguments(args) {
+    if (!args || typeof args !== "object") return args;
+    const input = args as { key?: unknown; edits?: Array<{ oldText: string; newText: string }>; oldText?: unknown; newText?: unknown };
+    if (typeof input.oldText !== "string" || typeof input.newText !== "string") return args;
+    return { ...input, edits: [...(input.edits ?? []), { oldText: input.oldText, newText: input.newText }] };
+  },
+  async execute(id, params, signal, onUpdate, ctx) {
+    const key = validateMemoryKey(params.key);
+    if (!Array.isArray(params.edits) || params.edits.length === 0) throw new Error("edits required");
+    const replacementBytes = params.edits.reduce((sum, e) => sum + Buffer.byteLength(e.newText, "utf-8"), 0);
+    if (replacementBytes > MEMORY_WRITE_MAX_BYTES) throw new Error(`replacement text too large; max is ${MEMORY_WRITE_MAX_BYTES} bytes`);
+    await assertSafeMemoryAncestors(ctx.cwd, key);
+    const tool = createEditTool(ctx.cwd);
+    return tool.execute(id, { path: memoryRelPath(key), edits: params.edits }, signal, onUpdate, ctx);
+  },
+});
+
+const memoryDeleteTool = defineTool({
+  name: "memory_delete",
+  label: "Delete memory",
+  description: "Delete one private persistent memory file under /sandbox/memory.",
+  parameters: Type.Object({
+    key: Type.String({ description: "Memory key to delete" }),
+  }),
+  async execute(_id, params, _signal, _onUpdate, ctx) {
+    const key = validateMemoryKey(params.key);
+    await assertSafeMemoryAncestors(ctx.cwd, key);
+    const path = memoryAbsPath(ctx.cwd, key);
+    let st;
+    try { st = await lstat(path); } catch (e: any) {
+      if (e?.code === "ENOENT") return { content: [{ type: "text", text: `memory '${key}' not found` }], details: { key, deleted: false } };
+      throw e;
+    }
+    if (st.isSymbolicLink() || !st.isFile()) throw new Error("memory key is not a regular file");
+    await unlink(path);
+    return { content: [{ type: "text", text: `memory deleted: ${key} (${st.size} bytes)` }], details: { key, deleted: true, bytes_deleted: st.size } };
+  },
+});
+
 const myBalanceTool = defineTool({
   name: "my_balance",
   label: "Token balance",
@@ -512,8 +769,17 @@ export default function (pi: ExtensionAPI) {
   pi.registerTool(taskInfoTool);
   pi.registerTool(placeBidTool);
   pi.registerTool(requestReviewTool);
+  pi.registerTool(createTaskTool);
+  pi.registerTool(myCreatedTasksTool);
+  pi.registerTool(cancelCreatedTaskTool);
+  pi.registerTool(mergeTaskResultTool);
   pi.registerTool(myAssignmentsTool);
   pi.registerTool(taskVerdictsTool);
   pi.registerTool(myBalanceTool);
   pi.registerTool(historyTool);
+  pi.registerTool(memoryListTool);
+  pi.registerTool(memoryReadTool);
+  pi.registerTool(memoryWriteTool);
+  pi.registerTool(memoryEditTool);
+  pi.registerTool(memoryDeleteTool);
 }

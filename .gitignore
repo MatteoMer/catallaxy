@@ -18,6 +18,7 @@ agents/*/sandbox/balance.json
 !agents/_template/sandbox/balance.json
 agents/*/sandbox/memory/
 agents/*/sandbox/work/
+agents/*/sandbox/.cache/
 # Sandbox symlinks regenerated at runtime
 agents/*/sandbox/SYSTEM.md
 agents/*/sandbox/market

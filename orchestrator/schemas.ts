@@ -18,6 +18,10 @@ export const TaskSchema = z.object({
   subjective_criteria: z.string().optional(),
   status: z.enum(["open", "assigned", "completed", "expired"]),
   posted_by: z.string(),
+  /** Agent that funded/created this task, if any. Public; reservation/escrow stays private. */
+  creator: z.string().optional(),
+  /** Optional parent task this was split out of by an agent. */
+  parent_task_id: z.string().optional(),
   posted_at: Timestamp,
   deadline_at: Timestamp,
 });
@@ -68,6 +72,8 @@ export const BalanceSchema = z.object({
         "debit_review_fee",
         "credit_bounty",
         "debit_bounty",
+        "debit_escrow_lock",
+        "credit_escrow_refund",
         "transfer",
       ]),
       amount: z.number(),

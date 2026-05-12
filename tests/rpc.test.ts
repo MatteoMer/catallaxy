@@ -23,6 +23,7 @@ beforeAll(async () => {
   await mkdir(`${workdir}/market/review_responses`, { recursive: true });
   await mkdir(`${workdir}/agents/alice/sandbox`, { recursive: true });
   await mkdir(`${workdir}/agents/bob/sandbox`, { recursive: true });
+  await mkdir(`${workdir}/agents/alice/sandbox/work/task-002`, { recursive: true });
   await mkdir(`${workdir}/orchestrator/private/history`, { recursive: true });
   await writeFile(`${workdir}/orchestrator/private/audit/.keep`, "").catch(() => {});
   await mkdir(`${workdir}/orchestrator/private/audit`, { recursive: true });
@@ -88,10 +89,27 @@ beforeAll(async () => {
     JSON.stringify({ task_id: "task-003", winner: "alice", payment: 1000, assigned_at: new Date().toISOString() })
   );
 
+  const sourceRepo = `${workdir}/agents/alice/sandbox/work/task-002`;
+  await writeFile(`${sourceRepo}/README.md`, "source\n");
+  for (const args of [
+    ["init", "-b", "main"],
+    ["config", "user.email", "alice@example.test"],
+    ["config", "user.name", "Alice"],
+    ["add", "README.md"],
+    ["commit", "-m", "init"],
+  ]) {
+    const proc = Bun.spawn(["git", "-C", sourceRepo, ...args], { stdout: "ignore", stderr: "pipe" });
+    const err = await new Response(proc.stderr).text();
+    if (await proc.exited) throw new Error(`git ${args.join(" ")} failed: ${err}`);
+  }
+
   process.env.MARKET_DIR = `${workdir}/market`;
   process.env.AGENTS_DIR = `${workdir}/agents`;
   process.env.AGENT_HISTORY_DIR = `${workdir}/orchestrator/private/history`;
   process.env.CATALLAXY_AUDIT_DIR = `${workdir}/orchestrator/private/audit`;
+  process.env.EVENTS_PATH = `${workdir}/orchestrator/private/events.jsonl`;
+  process.env.RESERVATIONS_PATH = `${workdir}/orchestrator/private/reservations.json`;
+  process.env.ESCROWS_PATH = `${workdir}/orchestrator/private/escrows.json`;
   // Use an ephemeral port so concurrent test runs don't collide.
   process.env.CATALLAXY_RPC_PORT = "0";
 
@@ -108,6 +126,12 @@ beforeAll(async () => {
   port = tryPort;
 
   const { startRpcServer } = await import("../orchestrator/rpc/server");
+  const { setLedgerAccess } = await import("../orchestrator/rpc/methods");
+  const ledger = { alice: { balance: 12345, history: [] } } as any;
+  setLedgerAccess(ledger, async () => {
+    await writeFile(`${workdir}/orchestrator/ledger.json`, JSON.stringify(ledger, null, 2));
+    await writeFile(`${workdir}/agents/alice/sandbox/balance.json`, JSON.stringify(ledger.alice, null, 2));
+  });
   const tokens = generateTokens(["alice", "bob"]);
   aliceTok = tokens.byAgent.get("alice")!;
   bobTok = tokens.byAgent.get("bob")!;
@@ -201,6 +225,153 @@ describe("RPC end-to-end", () => {
   test("history returns the orchestrator-written log", async () => {
     const r = await rpc({ id: 10, method: "history", auth: aliceTok });
     expect(r.result.text).toContain("alice history line");
+  });
+
+  test("create_task escrows creator funds and prevents creator self-bids", async () => {
+    const { setWakeScope, clearWakeScope } = await import("../orchestrator/rpc/methods");
+    setWakeScope("alice", { kind: "work", taskId: "task-002" });
+    let createdId = "";
+    try {
+      const created = await rpc({
+        id: 120,
+        method: "create_task",
+        auth: aliceTok,
+        params: {
+          description: "child task from alice",
+          max_payment: 1000,
+          deterministic_checks: ["bun test"],
+        },
+      });
+      expect(created.result.task.creator).toBe("alice");
+      expect(created.result.task.parent_task_id).toBe("task-002");
+      expect(created.result.escrow.amount).toBe(1000);
+      createdId = created.result.task.id;
+    } finally {
+      clearWakeScope("alice");
+    }
+
+    const afterCreate = JSON.parse(await Bun.file(`${workdir}/agents/alice/sandbox/balance.json`).text());
+    expect(afterCreate.balance).toBe(11345);
+    const reservations = JSON.parse(await Bun.file(`${workdir}/orchestrator/private/reservations.json`).text());
+    expect(reservations[createdId]).toBe(1000);
+
+    const selfBid = await rpc({
+      id: 121,
+      method: "place_bid",
+      auth: aliceTok,
+      params: { task_id: createdId, price: 500 },
+    });
+    expect(selfBid.error.message).toContain("creators cannot bid");
+
+    const mine = await rpc({ id: 122, method: "my_created_tasks", auth: aliceTok });
+    expect(mine.result.tasks.some((t: any) => t.id === createdId && t.escrow_remaining === 1000)).toBe(true);
+
+    const cancelled = await rpc({
+      id: 123,
+      method: "cancel_created_task",
+      auth: aliceTok,
+      params: { task_id: createdId },
+    });
+    expect(cancelled.result.refunded).toBe(1000);
+    const afterCancel = JSON.parse(await Bun.file(`${workdir}/agents/alice/sandbox/balance.json`).text());
+    expect(afterCancel.balance).toBe(12345);
+  });
+
+  test("memory_write/read/edit/delete are private and persistent", async () => {
+    const write = await rpc({
+      id: 101,
+      method: "memory_write",
+      auth: aliceTok,
+      params: { key: "core.md", mode: "replace", content: "Bid floor for strings: 120000 tokens\n" },
+    });
+    expect(write.result.key).toBe("core.md");
+    expect(write.result.bytes_written).toBeGreaterThan(0);
+
+    const append = await rpc({
+      id: 102,
+      method: "memory_write",
+      auth: aliceTok,
+      params: { key: "core.md", mode: "append", content: "Delete stale notes when wrong.\n" },
+    });
+    expect(append.result.file_bytes).toBeGreaterThan(write.result.file_bytes);
+
+    const read = await rpc({
+      id: 103,
+      method: "memory_read",
+      auth: aliceTok,
+      params: { key: "core.md" },
+    });
+    expect(read.result.content).toContain("Bid floor");
+    expect(read.result.content).toContain("Delete stale");
+
+    const edit = await rpc({
+      id: 104,
+      method: "memory_edit",
+      auth: aliceTok,
+      params: { key: "core.md", old_text: "Delete stale notes when wrong.\n", new_text: "" },
+    });
+    expect(edit.result.bytes_after).toBeLessThan(edit.result.bytes_before);
+
+    const edited = await rpc({
+      id: 105,
+      method: "memory_read",
+      auth: aliceTok,
+      params: { key: "core.md" },
+    });
+    expect(edited.result.content).not.toContain("Delete stale");
+
+    const bobList = await rpc({ id: 106, method: "memory_list", auth: bobTok });
+    expect(bobList.result.items).toHaveLength(0);
+
+    const del = await rpc({
+      id: 107,
+      method: "memory_delete",
+      auth: aliceTok,
+      params: { key: "core.md" },
+    });
+    expect(del.result.deleted).toBe(true);
+  });
+
+  test("memory rejects traversal and oversized writes", async () => {
+    const traversal = await rpc({
+      id: 108,
+      method: "memory_read",
+      auth: aliceTok,
+      params: { key: "../balance.json" },
+    });
+    expect(traversal.error.message).toContain("invalid memory key");
+
+    const tooLarge = await rpc({
+      id: 109,
+      method: "memory_write",
+      auth: aliceTok,
+      params: { key: "big.md", mode: "replace", content: "x".repeat(40000) },
+    });
+    expect(tooLarge.error.message).toContain("content too large");
+  });
+
+  test("request_review rejects duplicate pending requests", async () => {
+    const { setWakeScope, clearWakeScope } = await import("../orchestrator/rpc/methods");
+    setWakeScope("alice", { kind: "work", taskId: "task-002" });
+    try {
+      const first = await rpc({
+        id: 110,
+        method: "request_review",
+        auth: aliceTok,
+        params: { task_id: "task-002", branch: "feature/task-002" },
+      });
+      expect(first.result.request.seq).toBe(1);
+
+      const second = await rpc({
+        id: 111,
+        method: "request_review",
+        auth: aliceTok,
+        params: { task_id: "task-002", branch: "feature/task-002" },
+      });
+      expect(second.error.message).toContain("review already pending");
+    } finally {
+      clearWakeScope("alice");
+    }
   });
 
   test("work wake scope hides other assignments and rejects other task actions", async () => {

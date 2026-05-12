@@ -22,7 +22,14 @@ type Schema<T> = { parse: (d: unknown) => T };
 type TaskStatus = Task["status"];
 
 interface Summary {
-  agents: { name: string; balance: number | null; status: "alive" | "bankrupt" | "unknown" }[];
+  agents: {
+    name: string;
+    balance: number | null;
+    theoretical_balance: number | null;
+    assigned_payment_pending: number;
+    assigned_task_count: number;
+    status: "alive" | "bankrupt" | "unknown";
+  }[];
   tasks: Record<TaskStatus, number>;
   open_auctions: {
     id: string;
@@ -164,8 +171,18 @@ async function buildSummary(): Promise<Summary> {
   try { pendingSummaries = (await listJson(PENDING_SUMMARIES_DIR)).length; } catch {}
   if (pendingSummaries > 0) warnings.push(`${pendingSummaries} pending task cost summar${pendingSummaries === 1 ? "y" : "ies"}`);
 
+  const assignedPaymentsByAgent = new Map<string, { payment: number; count: number }>();
+  for (const a of assignments) {
+    const t = taskById.get(a.task_id);
+    if (t?.status !== "assigned") continue;
+    const current = assignedPaymentsByAgent.get(a.winner) ?? { payment: 0, count: 0 };
+    current.payment += a.payment;
+    current.count++;
+    assignedPaymentsByAgent.set(a.winner, current);
+  }
+
   const agents: Summary["agents"] = [];
-  const allAgentNames = new Set([...agentNames, ...Object.keys(ledger ?? {})]);
+  const allAgentNames = new Set([...agentNames, ...Object.keys(ledger ?? {}), ...assignedPaymentsByAgent.keys()]);
   for (const name of [...allAgentNames].sort()) {
     let balance = ledger?.[name]?.balance ?? null;
     const balancePath = `${AGENTS_DIR}/${name}/sandbox/balance.json`;
@@ -176,9 +193,13 @@ async function buildSummary(): Promise<Summary> {
       const parsed = await readParsed(balancePath, BalanceSchema, warnings);
       if (parsed) balance = parsed.balance;
     }
+    const pending = assignedPaymentsByAgent.get(name) ?? { payment: 0, count: 0 };
     agents.push({
       name,
       balance,
+      theoretical_balance: balance === null ? null : balance + pending.payment,
+      assigned_payment_pending: pending.payment,
+      assigned_task_count: pending.count,
       status: balance === null ? "unknown" : balance > 0 ? "alive" : "bankrupt",
     });
   }
@@ -237,9 +258,12 @@ function truncate(s: string, max = 96): string {
 function printText(s: Summary): void {
   console.log(bold("Agents"));
   if (!s.agents.length) console.log(dim("  none"));
+  else console.log(dim("  balance (if assigned tasks LGTM)"));
   for (const a of s.agents) {
     const color = a.status === "alive" ? green : a.status === "bankrupt" ? red : yellow;
-    console.log(`  ${a.name.padEnd(12)} ${money(a.balance).padStart(12)} ${color(a.status)}`);
+    const balance = `${money(a.balance)} (${money(a.theoretical_balance)})`;
+    const pending = a.assigned_task_count > 0 ? dim(` +${money(a.assigned_payment_pending)} pending/${a.assigned_task_count}`) : "";
+    console.log(`  ${a.name.padEnd(12)} ${balance.padStart(25)} ${color(a.status)}${pending}`);
   }
 
   console.log();

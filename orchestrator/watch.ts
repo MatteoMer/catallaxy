@@ -19,7 +19,7 @@ import { readdir, stat as fsStat, mkdir, rename, symlink, lstat, rm, unlink } fr
 import { existsSync, watch } from "node:fs";
 import {
   loadLedger, saveLedger, initAgent, debit, syncBalances, aliveAgents,
-  recordWakeup, recordEvent, flushPendingSummaries,
+  recordWakeup, recordEvent, flushPendingSummaries, addUsage, emptyUsage, usageFromPiUsage,
   type AgentUsage, type Ledger,
 } from "./ledger";
 import { resolveAuctions } from "./exchange";
@@ -35,7 +35,7 @@ import { generateTokens, REVIEWER_PRINCIPAL, type TokenMap } from "./auth";
 import { dim, gray, cyan, magenta, brightMagenta, yellow, brightYellow, red, brightRed, green, brightGreen, bold, blue } from "./log";
 import { renderMarkdownTables } from "./markdown";
 import { logEvent } from "./events";
-import { clearWakeScope, setWakeScope } from "./rpc/methods";
+import { clearWakeScope, setLedgerAccess, setWakeScope } from "./rpc/methods";
 import { advanceCampaigns } from "../.pi/extensions/catallaxy-interface/task";
 
 const AGENTS_DIR = process.env.AGENTS_DIR ?? "./agents";
@@ -196,6 +196,8 @@ interface WakePlan {
   taskId?: string;
 }
 
+const MEMORY_TOOLS = ["memory_list", "memory_read", "memory_write", "memory_edit", "memory_delete"];
+
 async function buildWakePlan(agent: string): Promise<WakePlan> {
   const now = new Date();
   const openIds: string[] = [];
@@ -204,11 +206,14 @@ async function buildWakePlan(agent: string): Promise<WakePlan> {
     if (t && t.status === "open") openIds.push(t.id);
   }
   const assignedIds: string[] = [];
+  const pendingReviewIds: string[] = [];
   for (const f of await listJsonFiles(`${MARKET}/assignments`)) {
     const a = await readJsonOrNull(`${MARKET}/assignments/${f}`, AssignmentSchema);
     if (!a || a.winner !== agent) continue;
     const t = await readJsonOrNull(`${MARKET}/tasks/${a.task_id}.json`, TaskSchema);
-    if (t && t.status === "assigned") assignedIds.push(a.task_id);
+    if (!t || t.status !== "assigned") continue;
+    if (await hasPendingReviewRequest(a.task_id, agent)) pendingReviewIds.push(a.task_id);
+    else assignedIds.push(a.task_id);
   }
 
   const lines: string[] = [];
@@ -218,7 +223,8 @@ async function buildWakePlan(agent: string): Promise<WakePlan> {
   if (assignedIds.length > 0) {
     const focus = assignedIds[0];
     lines.push(`Wake type: WORK. Focus only on assigned task ${focus}.`);
-    lines.push(`Other assigned tasks: ${assignedIds.slice(1).join(", ") || "none"}.`);
+    lines.push(`Other actionable assigned tasks: ${assignedIds.slice(1).join(", ") || "none"}.`);
+    lines.push(`Pending-review assignments: ${pendingReviewIds.join(", ") || "none"}.`);
     lines.push("Do not inspect open auctions and do not bid during a work wake. Finish or advance the focused assignment, request review when ready, then stop.");
     const v = await loadLatestVerdict(focus, agent);
     if (!v) {
@@ -235,20 +241,25 @@ async function buildWakePlan(agent: string): Promise<WakePlan> {
     lines.push(`  task_info       — details for focused task ${focus} only`);
     lines.push(`  task_verdicts   — verdicts for focused task ${focus} only`);
     lines.push(`  request_review  — request review for focused task ${focus}; after a successful request this wake will be cut off`);
+    lines.push("  create_task     — create an agent-funded real task from this assignment; escrow comes from your balance");
+    lines.push("  my_created_tasks/cancel_created_task/merge_task_result — manage and merge tasks you created");
     lines.push("  my_balance      — current token balance");
     lines.push("  history         — compact cost/bidding learnings from your history");
+    lines.push("  memory_list/read/write/edit/delete — private persistent memory tools scoped to /sandbox/memory");
     lines.push("  read, bash, edit, write — implementation work inside your sandbox only");
     lines.push("");
-    lines.push("Cash discipline: your balance is debited after every model turn. If it hits 0 mid-wake, the wake is aborted and you are bankrupt. Keep this work wake short; don't keep spending into a negative-net assignment.");
+    lines.push("Cash discipline: your balance is debited after every model turn. If it hits 0 mid-wake, the wake is aborted and you are bankrupt. Keep this work wake short; don't keep spending into a negative-net assignment. Maintain memory through memory_* tools; every read increases context.");
     return {
       kind: "work",
       taskId: focus,
       prompt: lines.join("\n"),
-      tools: ["my_assignments", "task_info", "task_verdicts", "request_review", "my_balance", "history", "read", "bash", "edit", "write"],
+      tools: ["my_assignments", "task_info", "task_verdicts", "request_review", "create_task", "my_created_tasks", "cancel_created_task", "merge_task_result", "my_balance", "history", ...MEMORY_TOOLS, "read", "bash", "edit", "write"],
     };
   }
 
-  lines.push("Wake type: BID. You have no active assignment to work on.");
+  lines.push(pendingReviewIds.length > 0
+    ? `Wake type: BID. Your assigned task(s) ${pendingReviewIds.join(", ")} are waiting on review; do not call request_review again unless a needs_work verdict arrives.`
+    : "Wake type: BID. You have no active assignment to work on.");
   lines.push(`Open auctions: ${openIds.length ? openIds.join(", ") : "none"}.`);
   lines.push("The open-auction list above is only a snapshot. Call list_tasks before bidding; new auctions may have appeared since this wake started.");
   lines.push("");
@@ -256,16 +267,18 @@ async function buildWakePlan(agent: string): Promise<WakePlan> {
   lines.push("  list_tasks  — list currently open auctions");
   lines.push("  task_info   — details for open auctions only");
   lines.push("  place_bid   — place/update a bid; after a successful bid this wake will be cut off");
+  lines.push("  create_task/my_created_tasks/cancel_created_task — create/manage real tasks you fund; create_task requires one of your assignment source_task_id outside WORK wakes");
   lines.push("  my_balance  — current token balance");
   lines.push("  history     — compact cost/bidding learnings from your history");
-  lines.push("Implementation, assignment, and review tools are disabled during bid wakes. Do not do task work before assignment.");
+  lines.push("  memory_list/read/write/edit/delete — private persistent memory tools scoped to /sandbox/memory");
+  lines.push("Implementation, assignment, review, shell, generic file, and merge_task_result tools are disabled during bid wakes. Do not do task work before assignment.");
   lines.push("");
-  lines.push("Before bidding: call `history` and use its compact cost learnings plus recent wake costs and task nets. Thinking tokens dominate. Reverse Vickrey auction: bid your true expected TOTAL cost plus margin; if you win, payment is second-lowest valid bid or reservation, not necessarily your bid. Underbidding only makes you win bad work. Goal: grow balance, not win auctions; don't work at a loss.");
+  lines.push("Before bidding: call `history` and use its compact cost learnings plus recent wake costs and task nets. Read or update memory only for concise private facts that improve pricing. Thinking tokens dominate. Reverse Vickrey auction: bid your true expected TOTAL cost plus margin; if you win, payment is second-lowest valid bid or reservation, not necessarily your bid. Underbidding only makes you win bad work. Goal: grow balance, not win auctions; don't work at a loss.");
   lines.push("Cash discipline: your balance is debited after every model turn. If it hits 0 mid-wake, the wake is aborted and you are bankrupt. Pick the single best profitable auction, place one bid, then stop; this wake will be cut off after a successful bid.");
   return {
     kind: "bid",
     prompt: lines.join("\n"),
-    tools: ["list_tasks", "task_info", "place_bid", "my_balance", "history"],
+    tools: ["list_tasks", "task_info", "place_bid", "create_task", "my_created_tasks", "cancel_created_task", "my_balance", "history", ...MEMORY_TOOLS],
   };
 }
 
@@ -297,43 +310,41 @@ function handlePiEvent(agent: string, line: string): void {
 
 let wakeCounter = 0;
 
-function usageFromTurnEnd(line: string): AgentUsage | null {
+function usageFromTurnEnd(line: string, model?: string): AgentUsage | null {
   try {
     const ev = JSON.parse(line);
     if (ev.type !== "turn_end" || !ev.message?.usage) return null;
-    const u = ev.message.usage;
-    return {
-      inputTokens: u.input ?? 0,
-      outputTokens: u.output ?? 0,
-      cacheReadTokens: u.cacheRead ?? 0,
-      totalTokens: u.totalTokens ?? 0,
-      costUsd: u.cost?.total ?? 0,
-    };
+    return usageFromPiUsage(ev.message.usage, model);
   } catch {
     return null;
   }
-}
-
-function addUsage(a: AgentUsage, b: AgentUsage): void {
-  a.inputTokens += b.inputTokens;
-  a.outputTokens += b.outputTokens;
-  a.cacheReadTokens += b.cacheReadTokens;
-  a.totalTokens += b.totalTokens;
-  a.costUsd += b.costUsd;
 }
 
 function usageFromHistorySummarizerEvent(ev: any): AgentUsage | null {
   if (ev?.type !== "tool_execution_end" || ev.toolName !== "history" || ev.isError) return null;
   const u = ev.result?.details?.history_summarizer_usage ?? ev.result?.history_summarizer_usage;
   if (!u || typeof u !== "object") return null;
-  const usage = {
+  const model = ev.result?.details?.history_summarizer_model ?? ev.result?.history_summarizer_model;
+  const usage: AgentUsage = {
     inputTokens: Number(u.inputTokens ?? 0),
     outputTokens: Number(u.outputTokens ?? 0),
     cacheReadTokens: Number(u.cacheReadTokens ?? 0),
+    cacheWriteTokens: Number(u.cacheWriteTokens ?? 0),
     totalTokens: Number(u.totalTokens ?? 0),
+    billableTokens: Number(u.billableTokens ?? 0),
     costUsd: Number(u.costUsd ?? 0),
   };
   if (!Number.isFinite(usage.totalTokens) || usage.totalTokens <= 0) return null;
+  if (!Number.isFinite(usage.billableTokens) || usage.billableTokens <= 0) {
+    return usageFromPiUsage({
+      input: usage.inputTokens,
+      output: usage.outputTokens,
+      cacheRead: usage.cacheReadTokens,
+      cacheWrite: usage.cacheWriteTokens,
+      totalTokens: usage.totalTokens,
+      cost: { total: usage.costUsd },
+    }, typeof model === "string" ? model : undefined);
+  }
   return usage;
 }
 
@@ -419,7 +430,7 @@ async function runAgent(
     runTag: wakeId,
   });
 
-  const usage: AgentUsage = { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, totalTokens: 0, costUsd: 0 };
+  const usage: AgentUsage = emptyUsage();
   const decoder = new TextDecoder();
   let buffer = "";
   let abortedForBankruptcy = false;
@@ -476,12 +487,12 @@ async function runAgent(
       debit(
         ledger,
         agent,
-        historySummarizerUsage.totalTokens,
-        `History summarizer: ${historySummarizerUsage.totalTokens}tok ($${historySummarizerUsage.costUsd.toFixed(4)})`,
+        historySummarizerUsage.billableTokens,
+        `History summarizer: ${historySummarizerUsage.billableTokens} billable tok (raw ${historySummarizerUsage.totalTokens}tok, $${historySummarizerUsage.costUsd.toFixed(4)})`,
         at
       );
       const balanceAfter = ledger[agent]?.balance ?? 0;
-      console.log(dim(`    ${agent}: -${historySummarizerUsage.totalTokens.toLocaleString()} history-summary tokens ($${historySummarizerUsage.costUsd.toFixed(4)}), balance ${balanceAfter.toLocaleString()}`));
+      console.log(dim(`    ${agent}: -${historySummarizerUsage.billableTokens.toLocaleString()} history-summary billable tokens (raw ${historySummarizerUsage.totalTokens.toLocaleString()}, $${historySummarizerUsage.costUsd.toFixed(4)}), balance ${balanceAfter.toLocaleString()}`));
       await logEvent({
         type: "history_summarizer_debit",
         at: at.toISOString(),
@@ -490,9 +501,11 @@ async function runAgent(
         kind: plan.kind,
         task_id: plan.taskId,
         tokens: historySummarizerUsage.totalTokens,
+        billable_tokens: historySummarizerUsage.billableTokens,
         input_tokens: historySummarizerUsage.inputTokens,
         output_tokens: historySummarizerUsage.outputTokens,
         cache_read_tokens: historySummarizerUsage.cacheReadTokens,
+        cache_write_tokens: historySummarizerUsage.cacheWriteTokens,
         cost_usd: historySummarizerUsage.costUsd,
         balance_before: balanceBefore,
         balance_after: balanceAfter,
@@ -509,7 +522,7 @@ async function runAgent(
           source: "history_summarizer",
           balanceBefore,
           balanceAfter,
-          debitTokens: historySummarizerUsage.totalTokens,
+          debitTokens: historySummarizerUsage.billableTokens,
           debitCostUsd: historySummarizerUsage.costUsd,
         });
         console.log(brightRed(`    ${agent}: bankrupt during history summarizer; aborting ${plan.kind} wake`));
@@ -517,14 +530,14 @@ async function runAgent(
       }
     }
 
-    const turnUsage = usageFromTurnEnd(line);
+    const turnUsage = usageFromTurnEnd(line, model);
     if (!turnUsage || turnUsage.totalTokens <= 0) return;
     addUsage(usage, turnUsage);
     const at = new Date();
     const balanceBefore = ledger[agent]?.balance ?? 0;
-    debit(ledger, agent, turnUsage.totalTokens, `Wakeup turn: ${turnUsage.totalTokens}tok ($${turnUsage.costUsd.toFixed(4)})`, at);
+    debit(ledger, agent, turnUsage.billableTokens, `Wakeup turn: ${turnUsage.billableTokens} billable tok (raw ${turnUsage.totalTokens}tok, $${turnUsage.costUsd.toFixed(4)})`, at);
     const balanceAfter = ledger[agent]?.balance ?? 0;
-    console.log(dim(`    ${agent}: -${turnUsage.totalTokens.toLocaleString()} turn tokens ($${turnUsage.costUsd.toFixed(4)}), balance ${balanceAfter.toLocaleString()}`));
+    console.log(dim(`    ${agent}: -${turnUsage.billableTokens.toLocaleString()} turn billable tokens (raw ${turnUsage.totalTokens.toLocaleString()}, $${turnUsage.costUsd.toFixed(4)}), balance ${balanceAfter.toLocaleString()}`));
     await logEvent({
       type: "turn_debit",
       at: at.toISOString(),
@@ -533,9 +546,11 @@ async function runAgent(
       kind: plan.kind,
       task_id: plan.taskId,
       tokens: turnUsage.totalTokens,
+      billable_tokens: turnUsage.billableTokens,
       input_tokens: turnUsage.inputTokens,
       output_tokens: turnUsage.outputTokens,
       cache_read_tokens: turnUsage.cacheReadTokens,
+      cache_write_tokens: turnUsage.cacheWriteTokens,
       cost_usd: turnUsage.costUsd,
       balance_before: balanceBefore,
       balance_after: balanceAfter,
@@ -552,7 +567,7 @@ async function runAgent(
         source: "turn_debit",
         balanceBefore,
         balanceAfter,
-        debitTokens: turnUsage.totalTokens,
+        debitTokens: turnUsage.billableTokens,
         debitCostUsd: turnUsage.costUsd,
       });
       console.log(brightRed(`    ${agent}: bankrupt mid-wake; aborting ${plan.kind} wake`));
@@ -609,9 +624,11 @@ async function runAgent(
     status: timedOut ? "timeout" : abortedForBankruptcy ? "bankrupt" : stoppedAfterBid ? "bid_cutoff" : stoppedAfterReview ? "review_cutoff" : exitCode === 0 ? "ok" : "error",
     exit_code: exitCode,
     total_tokens: usage.totalTokens,
+    billable_tokens: usage.billableTokens,
     input_tokens: usage.inputTokens,
     output_tokens: usage.outputTokens,
     cache_read_tokens: usage.cacheReadTokens,
+    cache_write_tokens: usage.cacheWriteTokens,
     cost_usd: usage.costUsd,
     balance_after: ledger[agent]?.balance ?? null,
   });
@@ -627,7 +644,7 @@ async function wakeAgent(agent: string, ledger: Ledger, tokens: TokenMap, record
   try {
     const usage = await runAgent(agent, ledger, tokens, recordBankruptcy);
     if (usage.totalTokens > 0) {
-      console.log(dim(`    ${agent}: wake total -${usage.totalTokens.toLocaleString()} tokens ($${usage.costUsd.toFixed(4)})`));
+      console.log(dim(`    ${agent}: wake total -${usage.billableTokens.toLocaleString()} billable tokens (raw ${usage.totalTokens.toLocaleString()}, $${usage.costUsd.toFixed(4)})`));
     }
     const ctx = await gatherWakeupContext(agent, at);
     await recordWakeup(agent, at, usage, ctx);
@@ -740,6 +757,7 @@ async function main() {
     await saveLedger(ledger);
     await syncBalances(ledger);
   };
+  setLedgerAccess(ledger, persist);
 
   // Agents that are already dead at watcher startup should not get a fresh
   // BANKRUPT history entry every reconcile tick. New crossings are recorded
@@ -849,7 +867,7 @@ async function main() {
 
   const settleAndPersist = async () => {
     try {
-      const r = await resolveAuctions();
+      const r = await resolveAuctions(new Date(), ledger);
       if (r.assigned + r.expired > 0) {
         console.log(brightYellow(`Settled: ${r.assigned} assigned, ${r.expired} expired`));
       }

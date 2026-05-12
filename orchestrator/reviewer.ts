@@ -16,6 +16,7 @@ import {
   type ReviewRequest,
 } from "./schemas";
 import { debitReviewFee, credit, writePendingSummary, recordEvent, type Ledger } from "./ledger";
+import { settleEscrowAfterPayment } from "./escrow";
 import { workDirFor } from "./workdir";
 import { spawnReviewer } from "./spawnReviewer";
 import { isLgtm } from "./lgtm";
@@ -95,12 +96,13 @@ export async function processReviewRequests(
           continue;
         }
         credit(ledger, req.agent, assignment.payment, `Accepted: ${req.task_id}`);
+        const escrowSettlement = await settleEscrowAfterPayment(ledger, req.task_id, assignment.payment, new Date());
         const completed: Task = { ...task, status: "completed" };
         await Bun.write(
           `${MARKET}/tasks/${req.task_id}.json`,
           JSON.stringify(completed, null, 2)
         );
-        console.log(brightGreen(`  ${req.task_id}: LGTM → +${assignment.payment} to ${req.agent}`));
+        console.log(brightGreen(`  ${req.task_id}: LGTM → +${assignment.payment} to ${req.agent}${escrowSettlement ? `, escrow refund ${escrowSettlement.refunded} to ${escrowSettlement.creator}` : ""}`));
 
         // Defer the summary write until the wake that called `request_review`
         // has finished and its debit has posted. watch.ts flushes pending

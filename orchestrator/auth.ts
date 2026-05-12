@@ -5,7 +5,7 @@
  * is passed to the container via env (`CATALLAXY_AUTH_TOKEN`); the
  * RPC server validates it on the first frame of each connection and
  * the egress proxy validates it on every request via
- * `X-Catallaxy-Token`.
+ * `X-Catallaxy-Token`, `Authorization`, or `Proxy-Authorization`.
  *
  * Why tokens at all: the RPC and proxy listeners bind on the bridge
  * interface so containers can reach them. Without tokens, anything

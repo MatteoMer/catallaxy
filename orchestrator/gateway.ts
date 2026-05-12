@@ -23,8 +23,9 @@
  * resolves to its catallaxy-agents IP. The agent's pi config and
  * env therefore use `catallaxy-gateway` instead of
  * `host.docker.internal`. From the agent's view, only this single
- * peer is reachable on the network — anything else times out for
- * lack of a route.
+ * peer is reachable on the network — direct connections elsewhere
+ * time out for lack of a route; package-manager egress must use the
+ * authenticated allowlisted proxy tunnel.
  *
  * The gateway runs as a long-lived container managed by the
  * watcher; reset.ts removes it.

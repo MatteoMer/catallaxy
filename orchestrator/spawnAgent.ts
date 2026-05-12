@@ -6,11 +6,12 @@
  *   - read-only root filesystem (tmpfs for /tmp and /home)
  *   - cpu/memory/pid limits
  *   - bind-mounted /sandbox (rw) — the agent's only writable host path
- *   - bind-mounted /run/catallaxy.sock — the RPC socket back to the host
+ *   - CATALLAXY_RPC_ADDR points at the gateway-forwarded RPC server
  *   - bind-mounted /pi-config (ro) — pi's models.json points the
- *     openrouter provider at the host-side egress proxy, so OpenRouter
- *     traffic flows through key injection. The container never sees
- *     the real OpenRouter key.
+ *     openrouter provider at the host-side egress proxy, so model
+ *     traffic flows through key injection. Package-manager HTTPS egress
+ *     uses the same proxy as an authenticated allowlisted CONNECT tunnel.
+ *     The container never sees real upstream API keys.
  *
  * If `BUN_SPAWN_AGENT_DIRECT=1` is set, falls back to direct `pi`
  * spawn for local diagnostics (NOT for production — bypasses every
@@ -54,6 +55,7 @@ export interface SpawnOpts {
 export function buildDockerArgs(opts: SpawnOpts, piArgs: string[]): string[] {
   const sandbox = `${AGENTS_DIR}/${opts.agent}/sandbox`;
   const piConfig = configDirFor(opts.agent);
+  const packageProxy = `http://catallaxy:${opts.authToken}@catallaxy-gateway:8443`;
 
   const args: string[] = [
     "docker", "run",
@@ -92,6 +94,23 @@ export function buildDockerArgs(opts: SpawnOpts, piArgs: string[]): string[] {
     // which the gateway forwards verbatim.
     "-e", `CATALLAXY_RPC_ADDR=catallaxy-gateway:9443`,
     "-e", `CATALLAXY_AUTH_TOKEN=${opts.authToken}`,
+    // Package-manager HTTPS egress (npm/pnpm/yarn/bun, plus any
+    // allowlisted HTTPS fetches) goes through the same authenticated
+    // proxy. Only HTTPS proxy vars are set so pi's plain-http model
+    // baseUrl is not accidentally re-proxied through itself.
+    "-e", `HTTPS_PROXY=${packageProxy}`,
+    "-e", `https_proxy=${packageProxy}`,
+    "-e", `NPM_CONFIG_HTTPS_PROXY=${packageProxy}`,
+    "-e", `npm_config_https_proxy=${packageProxy}`,
+    "-e", "NO_PROXY=catallaxy-gateway,localhost,127.0.0.1",
+    "-e", "no_proxy=catallaxy-gateway,localhost,127.0.0.1",
+    // Keep package-manager caches off the read-only root and out of
+    // the small HOME tmpfs. Persisting per-agent caches also makes
+    // repeated installs cheaper.
+    "-e", "NPM_CONFIG_CACHE=/sandbox/.cache/npm",
+    "-e", "npm_config_cache=/sandbox/.cache/npm",
+    "-e", "YARN_CACHE_FOLDER=/sandbox/.cache/yarn",
+    "-e", "BUN_INSTALL_CACHE_DIR=/sandbox/.cache/bun",
     "-w", "/sandbox",
     IMAGE,
     ...piArgs,
@@ -183,9 +202,11 @@ export function spawnAgent(opts: SpawnOpts): ReturnType<typeof Bun.spawn> {
  * agents on it have no route to the public internet AND no route to
  * the host. The gateway container (orchestrator/gateway.ts) bridges
  * agent-side traffic to the host's proxy/RPC ports, so the only
- * things an agent can reach are gateway:8443 (egress proxy) and
- * gateway:9443 (RPC). The agent's bash tool can curl `attacker.com`
- * all day; the packet has nowhere to go.
+ * things an agent can reach are gateway:8443 (model proxy plus
+ * allowlisted package-manager CONNECT) and gateway:9443 (RPC). The
+ * agent's bash tool can curl arbitrary hosts all day; unless the
+ * process uses the authenticated proxy and the target host is
+ * allowlisted, the packet has nowhere to go.
  *
  * ICC stays on (Docker default) because the gateway lives on this
  * same network — turning ICC off would block agent → gateway too,

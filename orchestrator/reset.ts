@@ -85,9 +85,10 @@ async function resetMarket(): Promise<void> {
 
 async function resetAgents(): Promise<void> {
   // Wipe everything in each sandbox except identity.json and the symlinks
-  // (SYSTEM.md, market). Also wipe parent-level memory/, work/, balance.json
-  // — these can exist if a stale (pre-sandbox-refactor) watcher is running
-  // OR an agent navigated up and wrote there.
+  // (SYSTEM.md, market). This explicitly deletes sandbox/memory/, including
+  // self-managed long-term memory. Also wipe parent-level memory/, work/,
+  // balance.json — these can exist if a stale (pre-sandbox-refactor) watcher
+  // is running OR an agent navigated up and wrote there.
   const keepInSandbox = new Set(["identity.json", "SYSTEM.md", "market"]);
   for (const a of await listAgents()) {
     const agentDir = `${AGENTS_DIR}/${a}`;

@@ -1,7 +1,7 @@
 import { mkdir, readdir, rm, cp } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { dirname } from "node:path";
-import { TaskSchema, AssignmentSchema, ReviewRequestSchema, ReviewResponseSchema, type Task } from "./schemas";
+import { TaskSchema, AssignmentSchema, ReviewRequestSchema, ReviewResponseSchema, BidSchema, type Task } from "./schemas";
 
 const ROOT = process.cwd();
 const MARKET = process.env.MARKET_DIR ?? `${ROOT}/market`;
@@ -297,6 +297,31 @@ async function taskStatus(taskId: string): Promise<Task["status"] | null> {
   catch { return null; }
 }
 
+async function campaignBidCounts(): Promise<Map<string, number>> {
+  const counts = new Map<string, number>();
+  for (const f of await listJson(`${MARKET}/bids`)) {
+    try {
+      const b = BidSchema.parse(await Bun.file(`${MARKET}/bids/${f}`).json());
+      counts.set(b.task_id, (counts.get(b.task_id) ?? 0) + 1);
+    } catch {}
+  }
+  return counts;
+}
+
+async function countedCampaignTasks(): Promise<number> {
+  const bidCounts = await campaignBidCounts();
+  let count = 0;
+  for (const f of await listJson(`${MARKET}/tasks`)) {
+    try {
+      const t = TaskSchema.parse(await Bun.file(`${MARKET}/tasks/${f}`).json());
+      if (t.posted_by !== "campaign") continue;
+      if (t.status === "expired" && (bidCounts.get(t.id) ?? 0) === 0) continue;
+      count++;
+    } catch {}
+  }
+  return count;
+}
+
 async function latestLgtm(taskId: string): Promise<{ agent: string; seq: number; branch: string } | null> {
   const responses = [] as any[];
   for (const f of await listJson(`${MARKET}/review_responses`)) {
@@ -408,6 +433,14 @@ async function tick(): Promise<void> {
   const state = await loadState();
   let changed = false;
 
+  const countedCreated = await countedCampaignTasks();
+  if (state.created !== countedCreated) {
+    console.log(`[campaign] effective created count ${countedCreated}/${state.target} (was ${state.created}; no-bid expired tasks do not count)`);
+    state.created = countedCreated;
+    changed = true;
+  }
+  const bidCounts = await campaignBidCounts();
+
   for (const project of projects) {
     const ps = state.projects[project.id];
     if (ps.index >= project.specs.length) continue;
@@ -423,7 +456,9 @@ async function tick(): Promise<void> {
       } else if (status === "expired") {
         const stageKey = String(ps.index);
         ps.retries[stageKey] = (ps.retries[stageKey] ?? 0) + 1;
-        console.log(`[campaign] ${ps.currentTask} expired; reposting ${project.id} step ${ps.index + 1} (retry ${ps.retries[stageKey]})`);
+        const bids = bidCounts.get(ps.currentTask) ?? 0;
+        const countNote = bids === 0 ? "; no bids, not counted toward target" : `; ${bids} bid(s), counted toward target`;
+        console.log(`[campaign] ${ps.currentTask} expired${countNote}; reposting ${project.id} step ${ps.index + 1} (retry ${ps.retries[stageKey]})`);
         ps.currentTask = undefined;
         changed = true;
       } else if (status === "open" || status === "assigned") {

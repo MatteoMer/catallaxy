@@ -30,7 +30,7 @@ export async function saveLedger(ledger: Ledger): Promise<void> {
   await Bun.write(LEDGER_PATH, JSON.stringify(ledger, null, 2));
 }
 
-export function initAgent(ledger: Ledger, name: string, startingBalance = 1_000_000): void {
+export function initAgent(ledger: Ledger, name: string, startingBalance = 10_000_000): void {
   if (!ledger[name]) {
     ledger[name] = { balance: startingBalance, history: [] };
   }
@@ -75,6 +75,32 @@ export function credit(
   entry.history.push({ at: at.toISOString(), type: "credit_bounty", amount, description });
 }
 
+export function debitEscrowLock(
+  ledger: Ledger,
+  agent: string,
+  amount: number,
+  description: string,
+  at: Date = new Date()
+): void {
+  const entry = ledger[agent];
+  if (!entry) return;
+  entry.balance -= amount;
+  entry.history.push({ at: at.toISOString(), type: "debit_escrow_lock", amount, description });
+}
+
+export function creditEscrowRefund(
+  ledger: Ledger,
+  agent: string,
+  amount: number,
+  description: string,
+  at: Date = new Date()
+): void {
+  const entry = ledger[agent];
+  if (!entry) return;
+  entry.balance += amount;
+  entry.history.push({ at: at.toISOString(), type: "credit_escrow_refund", amount, description });
+}
+
 export function isAlive(ledger: Ledger, agent: string): boolean {
   const entry = ledger[agent];
   return !!entry && entry.balance > 0;
@@ -97,11 +123,152 @@ export async function syncBalances(ledger: Ledger): Promise<void> {
 }
 
 export interface AgentUsage {
+  /** Fresh input tokens reported by pi/provider. */
   inputTokens: number;
+  /** Output tokens reported by pi/provider. */
   outputTokens: number;
+  /** Cache-read tokens reported by pi/provider. */
   cacheReadTokens: number;
+  /** Cache-write tokens reported by pi/provider. */
+  cacheWriteTokens: number;
+  /** Raw provider total tokens, for telemetry/context sizing only. */
   totalTokens: number;
+  /** Balance debit units after model-specific token accounting ratios. */
+  billableTokens: number;
   costUsd: number;
+}
+
+export interface TokenAccountingRatios {
+  /** Fresh input token multiplier. Usually 1. */
+  input: number;
+  /** Output token multiplier, relative to input tokens for this model. */
+  output: number;
+  /** Cache-read token multiplier, relative to input tokens for this model. */
+  cacheRead: number;
+  /** Cache-write token multiplier, relative to input tokens for this model. */
+  cacheWrite: number;
+}
+
+const DEFAULT_TOKEN_RATIOS: TokenAccountingRatios = {
+  input: 1,
+  output: 1,
+  cacheRead: 0.1,
+  cacheWrite: 1,
+};
+
+function cleanModelId(model: string | undefined | null): string | null {
+  const m = model?.trim();
+  return m ? m : null;
+}
+
+function parseRatioNumber(v: unknown): number | null {
+  const n = typeof v === "number" ? v : typeof v === "string" && v.trim() ? Number(v) : NaN;
+  return Number.isFinite(n) && n >= 0 ? n : null;
+}
+
+function normalizeRatios(raw: unknown): Partial<TokenAccountingRatios> | null {
+  if (!raw || typeof raw !== "object") return null;
+  const r = raw as Record<string, unknown>;
+  const out: Partial<TokenAccountingRatios> = {};
+  const input = parseRatioNumber(r.input);
+  const output = parseRatioNumber(r.output);
+  const cacheRead = parseRatioNumber(r.cacheRead ?? r.cache_read);
+  const cacheWrite = parseRatioNumber(r.cacheWrite ?? r.cache_write);
+  if (input !== null) out.input = input;
+  if (output !== null) out.output = output;
+  if (cacheRead !== null) out.cacheRead = cacheRead;
+  if (cacheWrite !== null) out.cacheWrite = cacheWrite;
+  return Object.keys(out).length ? out : null;
+}
+
+function modelAliases(model: string): string[] {
+  const aliases = [model];
+  const firstSlash = model.indexOf("/");
+  if (firstSlash >= 0 && firstSlash + 1 < model.length) aliases.push(model.slice(firstSlash + 1));
+  return aliases;
+}
+
+function envModelRatios(): Record<string, Partial<TokenAccountingRatios>> {
+  // JSON format:
+  //   CATALLAXY_MODEL_TOKEN_RATIOS='{"openrouter/foo":{"output":4,"cacheRead":0.1}}'
+  const raw = process.env.CATALLAXY_MODEL_TOKEN_RATIOS ?? process.env.CATALLAXY_TOKEN_RATIOS;
+  if (!raw?.trim()) return {};
+  try {
+    const parsed = JSON.parse(raw) as Record<string, unknown>;
+    const out: Record<string, Partial<TokenAccountingRatios>> = {};
+    for (const [model, ratios] of Object.entries(parsed)) {
+      const normalized = normalizeRatios(ratios);
+      if (normalized) out[model] = normalized;
+    }
+    return out;
+  } catch {
+    return {};
+  }
+}
+
+export function tokenAccountingRatiosForModel(model?: string | null): TokenAccountingRatios {
+  const ratios = { ...DEFAULT_TOKEN_RATIOS };
+  const globalCacheRead = parseRatioNumber(process.env.CATALLAXY_CACHE_READ_RATIO);
+  if (globalCacheRead !== null) ratios.cacheRead = globalCacheRead;
+  const globalCacheWrite = parseRatioNumber(process.env.CATALLAXY_CACHE_WRITE_RATIO);
+  if (globalCacheWrite !== null) ratios.cacheWrite = globalCacheWrite;
+
+  const m = cleanModelId(model);
+  if (m) {
+    const byModel = envModelRatios();
+    for (const alias of modelAliases(m)) {
+      const override = byModel[alias];
+      if (override) Object.assign(ratios, override);
+    }
+  }
+  return ratios;
+}
+
+export function billableTokensForUsage(usage: Pick<AgentUsage, "inputTokens" | "outputTokens" | "cacheReadTokens" | "cacheWriteTokens">, model?: string | null): number {
+  const r = tokenAccountingRatiosForModel(model);
+  return Math.ceil(
+    usage.inputTokens * r.input +
+    usage.outputTokens * r.output +
+    usage.cacheReadTokens * r.cacheRead +
+    usage.cacheWriteTokens * r.cacheWrite
+  );
+}
+
+export function emptyUsage(): AgentUsage {
+  return {
+    inputTokens: 0,
+    outputTokens: 0,
+    cacheReadTokens: 0,
+    cacheWriteTokens: 0,
+    totalTokens: 0,
+    billableTokens: 0,
+    costUsd: 0,
+  };
+}
+
+export function addUsage(a: AgentUsage, b: AgentUsage): void {
+  a.inputTokens += b.inputTokens;
+  a.outputTokens += b.outputTokens;
+  a.cacheReadTokens += b.cacheReadTokens;
+  a.cacheWriteTokens += b.cacheWriteTokens;
+  a.totalTokens += b.totalTokens;
+  a.billableTokens += b.billableTokens;
+  a.costUsd += b.costUsd;
+}
+
+export function usageFromPiUsage(u: any, model?: string | null): AgentUsage {
+  const inputTokens = Number(u?.input ?? 0);
+  const outputTokens = Number(u?.output ?? 0);
+  const cacheReadTokens = Number(u?.cacheRead ?? 0);
+  const cacheWriteTokens = Number(u?.cacheWrite ?? 0);
+  const rawTotal = Number(u?.totalTokens ?? (inputTokens + outputTokens + cacheReadTokens + cacheWriteTokens));
+  const partial = { inputTokens, outputTokens, cacheReadTokens, cacheWriteTokens };
+  return {
+    ...partial,
+    totalTokens: Number.isFinite(rawTotal) ? rawTotal : inputTokens + outputTokens + cacheReadTokens + cacheWriteTokens,
+    billableTokens: billableTokensForUsage(partial, model),
+    costUsd: Number(u?.cost?.total ?? 0),
+  };
 }
 
 /**
@@ -109,14 +276,8 @@ export interface AgentUsage {
  * Pi emits turn_end events with per-turn usage, and an agent_end summary.
  * We sum all assistant message usage across turns.
  */
-export function extractUsage(piJsonOutput: string): AgentUsage {
-  const usage: AgentUsage = {
-    inputTokens: 0,
-    outputTokens: 0,
-    cacheReadTokens: 0,
-    totalTokens: 0,
-    costUsd: 0,
-  };
+export function extractUsage(piJsonOutput: string, model?: string | null): AgentUsage {
+  const usage: AgentUsage = emptyUsage();
 
   for (const line of piJsonOutput.split("\n")) {
     if (!line.trim()) continue;
@@ -125,11 +286,7 @@ export function extractUsage(piJsonOutput: string): AgentUsage {
       // turn_end events contain per-turn usage in message.usage
       if (event.type === "turn_end" && event.message?.usage) {
         const u = event.message.usage;
-        usage.inputTokens += u.input ?? 0;
-        usage.outputTokens += u.output ?? 0;
-        usage.cacheReadTokens += u.cacheRead ?? 0;
-        usage.totalTokens += u.totalTokens ?? 0;
-        usage.costUsd += u.cost?.total ?? 0;
+        addUsage(usage, usageFromPiUsage(u, model));
       }
     } catch {
       // Not a JSON line, skip
@@ -157,7 +314,7 @@ export async function recordWakeup(
 
   const timestamp = at.toISOString().replace("T", " ").slice(0, 19);
   lines.push(`### ${timestamp} — wakeup`);
-  lines.push(`Wakeup cost: ${usage.totalTokens.toLocaleString()} tokens deducted from balance (in ${usage.inputTokens.toLocaleString()}, out ${usage.outputTokens.toLocaleString()}, cache ${usage.cacheReadTokens.toLocaleString()}) — $${usage.costUsd.toFixed(4)}`);
+  lines.push(`Wakeup cost: ${usage.billableTokens.toLocaleString()} billable tokens deducted from balance (raw ${usage.totalTokens.toLocaleString()}; in ${usage.inputTokens.toLocaleString()}, out ${usage.outputTokens.toLocaleString()}, cache read ${usage.cacheReadTokens.toLocaleString()}, cache write ${usage.cacheWriteTokens.toLocaleString()}) — $${usage.costUsd.toFixed(4)}`);
   for (const b of context.bidsPlaced) {
     const desc = b.description.length > 80 ? b.description.slice(0, 80) + "…" : b.description;
     lines.push(`- bid **${b.price.toLocaleString()}** on ${b.task_id} (${desc})`);

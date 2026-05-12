@@ -2,7 +2,7 @@
  * Per-agent pi config (models.json) generation.
  *
  * Pi reads provider overrides from `${PI_CODING_AGENT_DIR}/models.json`.
- * We point the openrouter provider at the per-agent proxy port so all
+ * We point the openrouter provider at the gateway-backed proxy so all
  * model traffic flows through the orchestrator.
  *
  * The config dir is mounted into the container as read-only, separate
@@ -19,16 +19,6 @@ export function configDirFor(agent: string): string {
   return `${AGENTS_DIR}/${agent}/.pi-config`;
 }
 
-/**
- * Write `${agentDir}/.pi-config/models.json` for one agent. Called
- * from the watcher / pretrain at startup, after proxy ports have
- * been assigned.
- *
- * Inside the container, `host.docker.internal` resolves to the host
- * via `--add-host=host.docker.internal:host-gateway` (set in
- * spawnAgent). The proxy listens on `0.0.0.0:port` so containers can
- * reach it.
- */
 /**
  * Write per-agent pi config.
  *

@@ -49,7 +49,7 @@ import {
 } from "./ledger";
 import { prepareWorkDir, workDirFor } from "./workdir";
 import { startRpcServer } from "./rpc/server";
-import { clearWakeScope, setWakeScope } from "./rpc/methods";
+import { clearWakeScope, setLedgerAccess, setWakeScope } from "./rpc/methods";
 import { spawnAgent, ensureAgentNetwork } from "./spawnAgent";
 import { startProxyServer, type ProxyServerHandle } from "./proxy/server";
 import { writeAgentConfig } from "./proxy/agentConfig";
@@ -209,6 +209,8 @@ interface WakePlan {
   taskId?: string;
 }
 
+const MEMORY_TOOLS = ["memory_list", "memory_read", "memory_write", "memory_edit", "memory_delete"];
+
 async function buildWakePlan(agent: string): Promise<WakePlan> {
   const now = new Date();
   const openIds: string[] = [];
@@ -255,16 +257,19 @@ async function buildWakePlan(agent: string): Promise<WakePlan> {
     lines.push(`  task_info       — details for focused task ${focus} only`);
     lines.push(`  task_verdicts   — verdicts for focused task ${focus} only`);
     lines.push(`  request_review  — request review for focused task ${focus}`);
+    lines.push("  create_task     — create an agent-funded real task from this assignment; escrow comes from your balance");
+    lines.push("  my_created_tasks/cancel_created_task/merge_task_result — manage and merge tasks you created");
     lines.push("  my_balance      — current token balance");
     lines.push("  history         — compact cost/bidding learnings from your history");
+    lines.push("  memory_list/read/write/edit/delete — private persistent memory tools scoped to /sandbox/memory");
     lines.push("  read, bash, edit, write — implementation work inside your sandbox only");
     lines.push("");
-    lines.push("Cash discipline: your balance is debited after every model turn. Keep this work wake short; don't keep spending into a negative-net assignment.");
+    lines.push("Cash discipline: your balance is debited after every model turn. Keep this work wake short; don't keep spending into a negative-net assignment. Maintain memory through memory_* tools; every read increases context.");
     return {
       kind: "work",
       taskId: focus,
       prompt: lines.join("\n"),
-      tools: ["my_assignments", "task_info", "task_verdicts", "request_review", "my_balance", "history", "read", "bash", "edit", "write"],
+      tools: ["my_assignments", "task_info", "task_verdicts", "request_review", "create_task", "my_created_tasks", "cancel_created_task", "merge_task_result", "my_balance", "history", ...MEMORY_TOOLS, "read", "bash", "edit", "write"],
     };
   }
 
@@ -276,16 +281,18 @@ async function buildWakePlan(agent: string): Promise<WakePlan> {
   lines.push("  list_tasks  — list currently open auctions");
   lines.push("  task_info   — details for open auctions only");
   lines.push("  place_bid   — place/update a bid");
+  lines.push("  create_task/my_created_tasks/cancel_created_task — create/manage real tasks you fund; create_task requires one of your assignment source_task_id outside WORK wakes");
   lines.push("  my_balance  — current token balance");
   lines.push("  history     — compact cost/bidding learnings from your history");
-  lines.push("Implementation, assignment, and review tools are disabled during bid wakes. Do not do task work before assignment.");
+  lines.push("  memory_list/read/write/edit/delete — private persistent memory tools scoped to /sandbox/memory");
+  lines.push("Implementation, assignment, review, shell, generic file, and merge_task_result tools are disabled during bid wakes. Do not do task work before assignment.");
   lines.push("");
-  lines.push("Before bidding: call `history` and use its cost learnings plus recent wake costs and task nets. Thinking tokens dominate. Reverse Vickrey auction: bid your true expected TOTAL cost plus margin; if you win, payment is second-lowest valid bid or reservation, not necessarily your bid. Underbidding only makes you win bad work. Goal: grow balance, not win auctions; don't work at a loss.");
+  lines.push("Before bidding: call `history` and use its cost learnings plus recent wake costs and task nets. Read or update memory only for concise private facts that improve pricing. Thinking tokens dominate. Reverse Vickrey auction: bid your true expected TOTAL cost plus margin; if you win, payment is second-lowest valid bid or reservation, not necessarily your bid. Underbidding only makes you win bad work. Goal: grow balance, not win auctions; don't work at a loss.");
   lines.push("Cash discipline: your balance is debited after every model turn. Pick the single best profitable auction, place one bid, then stop; live wakes are cut off after a successful bid.");
   return {
     kind: "bid",
     prompt: lines.join("\n"),
-    tools: ["list_tasks", "task_info", "place_bid", "my_balance", "history"],
+    tools: ["list_tasks", "task_info", "place_bid", "create_task", "my_created_tasks", "cancel_created_task", "my_balance", "history", ...MEMORY_TOOLS],
   };
 }
 
@@ -296,10 +303,11 @@ async function runPi(agent: string, plan: WakePlan, tokens: TokenMap): Promise<{
   const token = tokens.byAgent.get(agent);
   if (!token) throw new Error(`no auth token for agent '${agent}'`);
   setWakeScope(agent, { kind: plan.kind, taskId: plan.taskId });
+  const model = process.env.AGENT_MODEL ?? "openrouter/deepseek/deepseek-v4-flash";
   const proc = spawnAgent({
     agent,
     prompt: plan.prompt,
-    model: process.env.AGENT_MODEL ?? "openrouter/deepseek/deepseek-v4-flash",
+    model,
     tools: plan.tools,
     authToken: token,
     runTag: `pt${++pretrainWakeCounter}`,
@@ -315,7 +323,7 @@ async function runPi(agent: string, plan: WakePlan, tokens: TokenMap): Promise<{
     const stderr = await new Response(proc.stderr).text();
     const code = await proc.exited;
     if (code !== 0) console.error(red(`  [${agent}] pi exit ${code}: ${stderr.slice(0, 200)}`));
-    return { usage: extractUsage(captured) };
+    return { usage: extractUsage(captured, model) };
   } finally {
     clearWakeScope(agent);
   }
@@ -469,12 +477,12 @@ async function pretrainOne(
   const { usage: bidUsage } = await runPi(agent, biddingPlan, tokens);
   const bidCtx = await gatherWakeContext(agent, biddingAt);
   if (bidUsage.totalTokens > 0) {
-    debit(ledger, agent, bidUsage.totalTokens, `Wakeup: ${bidUsage.totalTokens}tok ($${bidUsage.costUsd.toFixed(4)})`, biddingAt);
+    debit(ledger, agent, bidUsage.billableTokens, `Wakeup: ${bidUsage.billableTokens} billable tok (raw ${bidUsage.totalTokens}tok, $${bidUsage.costUsd.toFixed(4)})`, biddingAt);
   }
   await recordWakeup(agent, biddingAt, bidUsage, bidCtx);
   await saveLedger(ledger);
   await syncBalances(ledger);
-  console.log(dim(`    ${agent}: -${bidUsage.totalTokens.toLocaleString()} tokens ($${bidUsage.costUsd.toFixed(4)})`));
+  console.log(dim(`    ${agent}: -${bidUsage.billableTokens.toLocaleString()} billable tokens (raw ${bidUsage.totalTokens.toLocaleString()}, $${bidUsage.costUsd.toFixed(4)})`));
 
   const bidPath = `${MARKET}/bids/${taskId}-${agent}.json`;
   if (!existsSync(bidPath)) {
@@ -519,13 +527,13 @@ async function pretrainOne(
     const { usage } = await runPi(agent, plan, tokens);
     const ctx = await gatherWakeContext(agent, at);
     if (usage.totalTokens > 0) {
-      debit(ledger, agent, usage.totalTokens, `Wakeup: ${usage.totalTokens}tok ($${usage.costUsd.toFixed(4)})`, at);
+      debit(ledger, agent, usage.billableTokens, `Wakeup: ${usage.billableTokens} billable tok (raw ${usage.totalTokens}tok, $${usage.costUsd.toFixed(4)})`, at);
     }
     await recordWakeup(agent, at, usage, ctx);
     await saveLedger(ledger);
     await syncBalances(ledger);
 
-    console.log(dim(`    ${agent}: -${usage.totalTokens.toLocaleString()} tokens ($${usage.costUsd.toFixed(4)})`));
+    console.log(dim(`    ${agent}: -${usage.billableTokens.toLocaleString()} billable tokens (raw ${usage.totalTokens.toLocaleString()}, $${usage.costUsd.toFixed(4)})`));
 
     const reqs = await findReviewRequestsAfter(taskId, agent, taskStartMs);
     const newReq = reqs.find((r) => !reviewedSeqs.has(r.seq));
@@ -600,8 +608,12 @@ async function main(): Promise<void> {
 
   const ledger = await loadLedger();
   for (const a of agents) initAgent(ledger, a);
-  await saveLedger(ledger);
-  await syncBalances(ledger);
+  const persist = async () => {
+    await saveLedger(ledger);
+    await syncBalances(ledger);
+  };
+  setLedgerAccess(ledger, persist);
+  await persist();
 
   if (n > TEMPLATES.length) {
     console.warn(yellow(`Pool has ${TEMPLATES.length} templates; n=${n} will reuse some.`));
@@ -609,8 +621,8 @@ async function main(): Promise<void> {
 
   // Bring up the same isolation infrastructure the watcher uses: an
   // RPC server (so the extension's tool calls work) and an egress
-  // proxy (so the agent's HTTPS traffic gets the OpenRouter key
-  // injected host-side).
+  // proxy (model key injection plus allowlisted package-manager
+  // CONNECT for npm installs).
   await ensureAgentNetwork();
   const tokens = generateTokens(agents);
   for (const agent of agents) {
