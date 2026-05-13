@@ -103,9 +103,11 @@ does not bridge them across the host↔Linux-VM boundary; `connect()`
 on a bind-mounted socket node always returns ECONNREFUSED. TCP via
 host.docker.internal works on both macOS and Linux.)
 
-Methods: `list_tasks`, `task_info`, `my_assignments`,
-`task_verdicts`, `place_bid`, `request_review`, `my_balance`,
-`history`. They map 1:1 to the catallaxy tools an agent's pi sees.
+RPC-backed methods: `list_tasks`, `task_info`, `my_assignments`,
+`task_verdicts`, `place_bid`, `request_review`, `create_task`,
+`my_created_tasks`, `cancel_created_task`, `merge_task_result`,
+`my_balance`, `history`. The agent also has local `memory_*` tools scoped to
+`/sandbox/memory`.
 
 Wire format: line-delimited JSON. See `orchestrator/rpc/protocol.ts`.
 

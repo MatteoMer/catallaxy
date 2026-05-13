@@ -18,7 +18,8 @@
  * --id is auto-assigned (task-NNN) if omitted.
  */
 
-import { readdir } from "node:fs/promises";
+import { mkdir, readdir } from "node:fs/promises";
+import { dirname } from "node:path";
 import { TaskSchema } from "./schemas";
 
 const MARKET = process.env.MARKET_DIR ?? "./market";
@@ -143,10 +144,12 @@ async function main(): Promise<void> {
     deadline_at: deadline.toISOString(),
   });
 
+  await mkdir(`${MARKET}/tasks`, { recursive: true });
   await Bun.write(`${MARKET}/tasks/${id}.json`, JSON.stringify(task, null, 2));
 
   const reservations = await loadReservations();
   reservations[id] = args.reservation;
+  await mkdir(dirname(RESERVATIONS_PATH), { recursive: true });
   await Bun.write(RESERVATIONS_PATH, JSON.stringify(reservations, null, 2));
 
   console.log(

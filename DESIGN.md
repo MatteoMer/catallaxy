@@ -10,43 +10,42 @@ This is an experiment testing whether LLMs under economic constraints exhibit em
 
 ### Agents
 
-- Each agent is an OpenCode instance running headlessly via `opencode run "..."`
-- OpenCode provides the full agent harness: file read/write, shell, search, LSP — we write zero agent code
-- OpenRouter as LLM provider — model-agnostic, swap models per agent if needed
-- Private workspace per agent (`/agents/{name}/`) — only they can write to it
-- All agents start identical: same tools, same permissions, same balance
-- Differentiation comes from pre-training context, not imposed roles
+- Each agent is a short-lived Docker container running Pi headlessly via `pi -p ... --mode json`.
+- Pi provides the harness; Catallaxy adds a project-local extension exposing market/memory tools.
+- OpenRouter-compatible models are routed through an authenticated host-side proxy; agents never see upstream API keys.
+- Private workspace per agent (`agents/{name}/sandbox/`) is mounted as `/sandbox`; sibling agents and market internals are not mounted.
+- All agents start identical: same tools, same permissions, same balance.
+- Differentiation comes from pre-training context and self-managed memory, not imposed roles.
 
-### Memory (Letta-inspired, self-managed)
+### Memory (self-managed)
 
-Agents manage their own memory via dedicated tools. Three tiers:
-- **Core memory** — always in context (AGENTS.md). Small, high-value facts the agent updates itself.
-- **Archival memory** — larger store the agent queries explicitly. Cost estimates, market observations, task history.
-- **Skills** — agent-created scripts, templates, tools that persist across rounds.
+Agents manage private persistent files under `/sandbox/memory` through scoped
+`memory_*` tools. Nothing from memory is loaded automatically; an agent pays to
+list/read only what it needs. The orchestrator separately writes append-only
+financial/task history outside the sandbox and exposes it through `history`.
 
-The agent decides what to remember, what to forget, what to look up. Memory quality becomes a competitive advantage:
+The agent decides what to remember, what to forget, and what to look up. Memory quality becomes a competitive advantage:
 - Good memory → accurate cost estimates → profitable bids → survival
 - Bad memory → mispriced bids → rejected work → bankruptcy
 - Cluttered memory → wasted context tokens every round → slow death
 
-Implemented via opencode-agent-memory plugin (Letta-inspired memory blocks for OpenCode).
-
 ### The Board
 
-File-based shared marketplace. No central coordinator — agents read and write to it themselves.
+The market is file-backed, but agents do not read/write it directly. They call authenticated Pi tools; the orchestrator validates the call and mutates runtime files.
 
 ```
-/market/tasks/       — posted tasks, anyone can read
-/market/bids/        — agents post bids here (visible to all)
-/market/results/     — completed work awaiting review
-/agents/alice/       — private workspace
-/agents/bob/         — private workspace
+/market/tasks/             — live task postings (git-ignored)
+/market/bids/              — live bid files (git-ignored)
+/market/assignments/       — auction results
+/market/review_requests/   — requested reviews
+/market/review_responses/  — reviewer verdicts
+/market/fixtures/          — tracked static examples/seed data
 ```
 
 Key information design decisions:
-- **Prices are visible** — this is what makes markets work. Prices aggregate dispersed knowledge.
-- **Bids are anonymous** — prevents collusion, forces competition on price/quality
-- **Balances are private** — prevents predatory behavior (lowballing a near-bankrupt agent)
+- **Open auctions are visible** through `list_tasks` / `task_info`.
+- **Bids are sealed during bidding**; settlement records the winner and clearing payment.
+- **Balances are private**; each agent can query only its own balance.
 
 ### Token Economics
 
@@ -97,11 +96,11 @@ No explicit scores. The balance IS the reputation:
 
 ### Review
 
-External to the economy. The reviewer (human or LLM panel) is the "customer":
-- Accepts or rejects completed work
-- Accepted: agent gets paid the bounty
-- Rejected: agent eats the cost of work done
-- No token cost for review itself — it's outside the economy
+External to the bidding market, but review fees are charged to the worker:
+- Worker commits a branch in `agents/{name}/sandbox/work/{task-id}` and calls `request_review`.
+- Reviewer checks the diff and deterministic commands.
+- LGTM: worker gets the clearing payment and escrow is settled/refunded.
+- Needs-work: worker eats the thinking/review cost and may iterate.
 
 ## Honest Assessment
 

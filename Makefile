@@ -1,4 +1,4 @@
-.PHONY: image image-if-needed image-push watch pause pretrain campaign status memory trace reset clean help
+.PHONY: image image-if-needed image-push watch pause pretrain campaign status memory trace reset clean test help
 
 IMAGE_TAG ?= catallaxy-agent:latest
 PI_VERSION ?= 0.70.6
@@ -16,6 +16,7 @@ help:
 	@echo "  trace         show per-task timeline (TASK=task-001)"
 	@echo "  reset         wipe runtime state (market/, ledgers, sockets, containers)"
 	@echo "  clean         reset + remove the agent image and bridge network"
+	@echo "  test          run unit tests"
 
 image:
 	docker/build.sh
@@ -59,6 +60,9 @@ clean: reset
 	-docker rm -f $(shell docker ps -a --filter "name=catallaxy-agent-" --format "{{.ID}}") 2>/dev/null || true
 	-docker network rm catallaxy-agents 2>/dev/null || true
 	-docker rmi $(IMAGE_TAG) 2>/dev/null || true
+
+test:
+	bun test
 
 # Catch-all so extra target-style args (e.g. `make campaign -- --once`) don't error.
 %:

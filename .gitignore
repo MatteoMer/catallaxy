@@ -8,10 +8,12 @@ repos/
 
 # Runtime market state
 .catallaxy/
+market/tasks/
 market/bids/
 market/assignments/
 market/review_requests/
 market/review_responses/
+market/pending_summaries/
 
 # Per-agent runtime state (template scaffolding tracked)
 agents/*/sandbox/balance.json

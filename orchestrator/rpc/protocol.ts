@@ -1,10 +1,10 @@
 /**
  * RPC protocol — line-delimited JSON envelope between agents and the
- * orchestrator. Each connection is identified by which Unix socket it
- * arrived on (the orchestrator listens on a per-agent socket), so
- * messages do not carry an agent identity field.
+ * orchestrator. Each frame carries a per-agent auth token; the server
+ * looks the token up and pins the connection to that agent. Messages do
+ * not carry a trusted agent identity field.
  *
- * Request:  {"id":N,"method":"...","params":{...}}\n
+ * Request:  {"id":N,"method":"...","params":{...},"auth":"token"}\n
  * Response: {"id":N,"result":...}\n
  *       or  {"id":N,"error":{"code":N,"message":"..."}}\n
  */

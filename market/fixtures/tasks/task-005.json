@@ -1,0 +1,18 @@
+{
+  "id": "task-005",
+  "description": "Create a Python module 'sum_digits.py' at the repo root exporting a 'sum_digits(n: int) -> int' function. Returns the sum of the decimal digits of |n| (treat negatives by ignoring the sign). sum_digits(0) is 0. Tests in tests/test_sum_digits.py must pass.",
+  "repo": "repos/playground",
+  "base_branch": "main",
+  "review_fee": 2000,
+  "deterministic_checks": [
+    {
+      "type": "command",
+      "cmd": "python3 -m unittest tests.test_sum_digits",
+      "must_pass": true
+    }
+  ],
+  "status": "open",
+  "posted_by": "fixture",
+  "posted_at": "1970-01-01T00:00:00.000Z",
+  "deadline_at": "1970-01-01T00:05:00.000Z"
+}

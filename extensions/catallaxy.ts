@@ -18,10 +18,11 @@
  *   - history         read your append-only history log (orchestrator-written)
  *   - memory_*        private persistent memory tools scoped to /sandbox/memory
  *
- * All tools talk to the orchestrator over a Unix-domain socket — they
- * have no direct filesystem access to market state. Identity is
- * implicit (which socket the connection arrived on), so the
- * orchestrator does not trust any agent name in the request payload.
+ * Market/economic tools talk to the orchestrator over authenticated TCP RPC
+ * via CATALLAXY_RPC_ADDR. They have no direct filesystem access to market
+ * state. Identity is fixed by CATALLAXY_AUTH_TOKEN, so the orchestrator
+ * ignores any agent name in request payloads. Memory tools are local Pi file
+ * tools scoped to /sandbox/memory.
  */
 
 import { Type } from "@mariozechner/pi-ai";

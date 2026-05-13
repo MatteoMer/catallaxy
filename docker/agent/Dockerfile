@@ -1,11 +1,12 @@
 # Catallaxy agent runtime image.
 #
 # Runs `pi` with the catallaxy extension as a low-privilege user. The
-# host orchestrator bind-mounts:
+# host orchestrator bind-mounts only:
 #   - the agent's sandbox at /sandbox (rw)
-#   - the agent's RPC socket at /run/catallaxy.sock
-# and exposes OpenRouter via an HTTP proxy on host.docker.internal —
-# never as an env var. No secrets are baked into this image.
+#   - generated pi config at /pi-config (ro)
+# RPC reaches the orchestrator through CATALLAXY_RPC_ADDR, and model/package
+# egress goes through the authenticated gateway/proxy. Upstream API keys are
+# injected host-side and are never present in the container env or image.
 #
 # Multi-arch build (linux/amd64 + linux/arm64) is performed by
 # docker/build.sh. The image is content-tagged so changes invalidate

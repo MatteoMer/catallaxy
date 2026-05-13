@@ -1,0 +1,4 @@
+[test]
+# Keep Bun's implicit test discovery out of live agent worktrees and campaign
+# worktrees, which may contain arbitrary project-specific *.test.ts files.
+root = "tests"
