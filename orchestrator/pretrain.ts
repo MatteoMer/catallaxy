@@ -68,6 +68,7 @@ import {
   PRETRAIN_TASKS as TEMPLATES,
   type PretrainTaskTemplate as Template,
 } from "./pretrainTasks";
+import { ensurePretrainFixtures } from "./pretrainFixtures";
 
 const ROOT = process.cwd();
 const MARKET = `${ROOT}/market`;
@@ -640,6 +641,7 @@ async function main(): Promise<void> {
   console.log(bold(`Pretrain: ${n} unique hard task(s) per agent, max ${maxIters} iter(s) per task`));
   console.log(dim(`Pool: ${TEMPLATES.length} tasks, min reservation ${MIN_PRETRAIN_RESERVATION.toLocaleString()}, reset balance ${DEFAULT_STARTING_BALANCE.toLocaleString()}`));
   await ensureMarketDirs();
+  await ensurePretrainFixtures(TEMPLATES);
 
   const discoveredAgents = await discoverAgents();
   const agents = requestedAgents.length ? requestedAgents : discoveredAgents;
