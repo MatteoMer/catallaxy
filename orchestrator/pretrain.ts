@@ -105,7 +105,7 @@ function parseArgs(argv: string[]): PretrainArgs {
       console.log(`Usage: bun orchestrator/pretrain.ts [--n ${DEFAULT_PRETRAIN_TASKS_PER_AGENT}] [--max-iters ${DEFAULT_PRETRAIN_MAX_ITERS}] [--list-tasks] [agent ...]
 
   --n N            unique dry-run tasks per agent (default ${DEFAULT_PRETRAIN_TASKS_PER_AGENT})
-  --max-iters M    max wake/review iterations per task (default ${DEFAULT_PRETRAIN_MAX_ITERS})
+  --max-iters M    max review submissions per task; stalled work wakes are capped separately (default ${DEFAULT_PRETRAIN_MAX_ITERS})
   --list-tasks     print the pretrain task catalog and exit
   agent ...        optional agent names to pretrain (default: all agents)
 
@@ -553,15 +553,26 @@ async function pretrainOne(
   await recordEvent(agent, settleAt, `won task ${taskId} at ${payment} (your bid: ${bid.price}; reserve ${template.reservation}; 1 valid bid)`);
   console.log(brightGreen(`  ${taskId}: ${agent} wins (bid ${bid.price.toLocaleString()}, paid ${payment.toLocaleString()}, reserve ${template.reservation.toLocaleString()})`));
 
-  // Phase 2: work wakes + review iterations.
+  // Phase 2: work wakes + review rounds.
+  // `maxIters` caps actual review submissions, not every model wake.
+  // A needs_work response just feeds the next work wake; that follow-up
+  // wake is not counted unless it submits another review request. Separate
+  // stall guards keep pretrain from looping forever when an agent keeps
+  // working without requesting review.
   const taskStartMs = Date.now();
   let lgtm = false;
   const reviewedSeqs = new Set<number>();
+  let reviewRounds = 0;
+  let workWakes = 0;
+  let noReviewWakes = 0;
+  const maxNoReviewWakes = Math.max(2, maxIters);
+  const maxWorkWakes = maxIters + maxNoReviewWakes;
 
-  for (let iter = 1; iter <= maxIters; iter++) {
+  while (reviewRounds < maxIters && noReviewWakes < maxNoReviewWakes && workWakes < maxWorkWakes) {
+    workWakes++;
     const at = new Date();
     const plan = await buildWakePlan(agent);
-    console.log(brightMagenta(`  → work wake ${agent} (iter ${iter}/${maxIters})`));
+    console.log(brightMagenta(`  → work wake ${agent} (wake ${workWakes}, reviews ${reviewRounds}/${maxIters})`));
 
     const { usage } = await runPi(agent, plan, tokens);
     const ctx = await gatherWakeContext(agent, at);
@@ -577,16 +588,18 @@ async function pretrainOne(
     const reqs = await findReviewRequestsAfter(taskId, agent, taskStartMs);
     const newReq = reqs.find((r) => !reviewedSeqs.has(r.seq));
     if (!newReq) {
-      console.log(dim("    no review_request from this wake"));
-      if (iter >= maxIters) break;
+      noReviewWakes++;
+      console.log(dim(`    no review_request from this wake (${noReviewWakes}/${maxNoReviewWakes} stalled wake(s))`));
       continue;
     }
 
+    noReviewWakes = 0;
     reviewedSeqs.add(newReq.seq);
+    reviewRounds++;
     debit(ledger, agent, assignedTask.review_fee, `Review fee: ${taskId} #${newReq.seq}`);
     await saveLedger(ledger);
     await syncBalances(ledger);
-    console.log(red(`    review ${taskId} #${newReq.seq}: -${assignedTask.review_fee} from ${agent}`));
+    console.log(red(`    review ${taskId} #${newReq.seq} (${reviewRounds}/${maxIters}): -${assignedTask.review_fee} from ${agent}`));
 
     const r = await runReview(assignedTask, newReq.branch, newReq.seq, agent, tokens.byAgent.get(REVIEWER_PRINCIPAL)!);
 
@@ -618,7 +631,13 @@ async function pretrainOne(
       lgtm = true;
       break;
     }
-    console.log(brightRed(`  ${taskId}: needs_work (#${newReq.seq})`));
+    console.log(brightRed(`  ${taskId}: needs_work (#${newReq.seq}); follow-up wake does not count as a review round until another review is requested`));
+  }
+
+  if (!lgtm) {
+    if (reviewRounds >= maxIters) console.log(dim(`  ${taskId}: review cap reached (${reviewRounds}/${maxIters})`));
+    else if (noReviewWakes >= maxNoReviewWakes) console.log(dim(`  ${taskId}: stalled without review_request (${noReviewWakes}/${maxNoReviewWakes})`));
+    else if (workWakes >= maxWorkWakes) console.log(dim(`  ${taskId}: work wake cap reached (${workWakes}/${maxWorkWakes})`));
   }
 
   const finalTask: Task = { ...assignedTask, status: lgtm ? "completed" : "expired" };
@@ -638,7 +657,7 @@ async function main(): Promise<void> {
     process.exit(1);
   }
 
-  console.log(bold(`Pretrain: ${n} unique hard task(s) per agent, max ${maxIters} iter(s) per task`));
+  console.log(bold(`Pretrain: ${n} unique hard task(s) per agent, max ${maxIters} review(s) per task`));
   console.log(dim(`Pool: ${TEMPLATES.length} tasks, min reservation ${MIN_PRETRAIN_RESERVATION.toLocaleString()}, reset balance ${DEFAULT_STARTING_BALANCE.toLocaleString()}`));
   await ensureMarketDirs();
   await ensurePretrainFixtures(TEMPLATES);
