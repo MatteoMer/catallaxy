@@ -21,6 +21,7 @@ ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update \
  && apt-get install -y --no-install-recommends \
         ca-certificates curl git python3 python3-pip unzip \
+        build-essential make pkg-config rustc cargo \
  && rm -rf /var/lib/apt/lists/*
 
 # Install bun (used by the extension at runtime — not by pi itself,

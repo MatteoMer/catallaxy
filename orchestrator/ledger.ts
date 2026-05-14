@@ -7,6 +7,7 @@
 
 import { mkdir, readdir, unlink } from "node:fs/promises";
 import { LedgerSchema, BalanceSchema, type Ledger, type Balance } from "./schemas";
+export type { Ledger } from "./schemas";
 
 const AGENTS_DIR = process.env.AGENTS_DIR ?? "./agents";
 const LEDGER_PATH = process.env.LEDGER_PATH ?? "./orchestrator/ledger.json";
@@ -16,6 +17,8 @@ const PENDING_SUMMARIES_DIR = `${MARKET}/pending_summaries`;
 // has no filesystem path to write it. Agents read history via the
 // `history` tool exposed by extensions/catallaxy.ts.
 const HISTORY_DIR = process.env.AGENT_HISTORY_DIR ?? "./orchestrator/private/history";
+
+export const DEFAULT_STARTING_BALANCE = 15_000_000;
 
 export async function loadLedger(): Promise<Ledger> {
   try {
@@ -30,7 +33,7 @@ export async function saveLedger(ledger: Ledger): Promise<void> {
   await Bun.write(LEDGER_PATH, JSON.stringify(ledger, null, 2));
 }
 
-export function initAgent(ledger: Ledger, name: string, startingBalance = 10_000_000): void {
+export function initAgent(ledger: Ledger, name: string, startingBalance = DEFAULT_STARTING_BALANCE): void {
   if (!ledger[name]) {
     ledger[name] = { balance: startingBalance, history: [] };
   }

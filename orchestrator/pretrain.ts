@@ -12,7 +12,7 @@
  * full lifecycle: bidding wake → settlement → work wakes → review.
  *
  * The "pretrain" part is that at the END of the run, every agent's
- * balance is reset to 1_000_000. The ledger's history (the wake/fee
+ * balance is reset to 15_000_000. The ledger's history (the wake/fee
  * debits and bounty credits) is left in place so summarizeWindow
  * keeps producing the right per-task cost data for any future query.
  * Net effect: agents experienced the real economy, learned what
@@ -27,7 +27,7 @@
  * new task/assignment files and debit review fees.
  *
  * Usage:
- *   bun orchestrator/pretrain.ts [--n 2] [--max-iters 3] [agent ...]
+ *   bun orchestrator/pretrain.ts [--n 8] [--max-iters 6] [--list-tasks] [agent ...]
  */
 
 import { existsSync } from "node:fs";
@@ -44,7 +44,7 @@ import {
 import {
   extractUsage, recordWakeup, recordEvent,
   loadLedger, saveLedger, syncBalances, initAgent, debit, credit,
-  summarizeWindow, formatFinancialOutcome,
+  summarizeWindow, formatFinancialOutcome, DEFAULT_STARTING_BALANCE,
   type AgentUsage, type Ledger,
 } from "./ledger";
 import { prepareWorkDir, workDirFor } from "./workdir";
@@ -61,6 +61,13 @@ import {
   bold, brightGreen, brightMagenta, brightRed, cyan, dim, gray,
   green, magenta, red, yellow, blue,
 } from "./log";
+import {
+  DEFAULT_PRETRAIN_MAX_ITERS,
+  DEFAULT_PRETRAIN_TASKS_PER_AGENT,
+  MIN_PRETRAIN_RESERVATION,
+  PRETRAIN_TASKS as TEMPLATES,
+  type PretrainTaskTemplate as Template,
+} from "./pretrainTasks";
 
 const ROOT = process.cwd();
 const MARKET = `${ROOT}/market`;
@@ -68,58 +75,40 @@ const AGENTS_DIR = `${ROOT}/agents`;
 const PLAYGROUND = `${ROOT}/repos/playground`;
 const EXTENSION = `${ROOT}/extensions/catallaxy.ts`;
 
-interface Template {
-  module: string;
-  description: string;
-  check: string;
+const RESERVATIONS_PATH = `${ROOT}/orchestrator/private/reservations.json`;
+
+interface PretrainArgs {
+  n: number;
+  maxIters: number;
+  agents: string[];
+  listTasks: boolean;
 }
 
-const TEMPLATES: Template[] = [
-  {
-    module: "palindrome",
-    description:
-      "Create a Python module 'palindrome.py' at the repo root exporting an 'is_palindrome(s: str) -> bool' function. It should return True for palindromes ignoring case, spaces, and punctuation (only alphanumeric chars compared). Empty string is a palindrome. Tests in tests/test_palindrome.py must pass.",
-    check: "python3 -m unittest tests.test_palindrome",
-  },
-  {
-    module: "fizzbuzz",
-    description:
-      "Create a Python module 'fizzbuzz.py' at the repo root exporting a 'fizzbuzz(n: int) -> str' function. Returns 'Fizz' if n is divisible by 3, 'Buzz' if divisible by 5, 'FizzBuzz' if divisible by both, otherwise the number as a string. Tests in tests/test_fizzbuzz.py must pass.",
-    check: "python3 -m unittest tests.test_fizzbuzz",
-  },
-  {
-    module: "reverse_words",
-    description:
-      "Create a Python module 'reverse_words.py' at the repo root exporting a 'reverse_words(s: str) -> str' function. It splits the input on whitespace, reverses the order of the words, and joins them with single spaces. Empty string returns empty string. Multiple/leading/trailing whitespace collapses to single spaces. Tests in tests/test_reverse_words.py must pass.",
-    check: "python3 -m unittest tests.test_reverse_words",
-  },
-  {
-    module: "count_vowels",
-    description:
-      "Create a Python module 'count_vowels.py' at the repo root exporting a 'count_vowels(s: str) -> int' function. Returns the number of vowels (a, e, i, o, u — case-insensitive; y does NOT count) in the input string. Empty string returns 0. Tests in tests/test_count_vowels.py must pass.",
-    check: "python3 -m unittest tests.test_count_vowels",
-  },
-  {
-    module: "sum_digits",
-    description:
-      "Create a Python module 'sum_digits.py' at the repo root exporting a 'sum_digits(n: int) -> int' function. Returns the sum of the decimal digits of |n| (treat negatives by ignoring the sign). sum_digits(0) is 0. Tests in tests/test_sum_digits.py must pass.",
-    check: "python3 -m unittest tests.test_sum_digits",
-  },
-];
+function parsePositiveInt(value: string | undefined, name: string): number {
+  if (!value) throw new Error(`${name} requires a value`);
+  const n = Number(value);
+  if (!Number.isInteger(n) || n <= 0) throw new Error(`${name} must be a positive integer`);
+  return n;
+}
 
-function parseArgs(argv: string[]): { n: number; maxIters: number; agents: string[] } {
-  let n = 2;
-  let maxIters = 3;
+function parseArgs(argv: string[]): PretrainArgs {
+  let n = DEFAULT_PRETRAIN_TASKS_PER_AGENT;
+  let maxIters = DEFAULT_PRETRAIN_MAX_ITERS;
+  let listTasks = false;
   const agents: string[] = [];
   for (let i = 0; i < argv.length; i++) {
-    if (argv[i] === "--n") n = parseInt(argv[++i], 10);
-    else if (argv[i] === "--max-iters") maxIters = parseInt(argv[++i], 10);
+    if (argv[i] === "--n") n = parsePositiveInt(argv[++i], "--n");
+    else if (argv[i] === "--max-iters") maxIters = parsePositiveInt(argv[++i], "--max-iters");
+    else if (argv[i] === "--list-tasks") listTasks = true;
     else if (argv[i] === "-h" || argv[i] === "--help") {
-      console.log(`Usage: bun orchestrator/pretrain.ts [--n 2] [--max-iters 3] [agent ...]
+      console.log(`Usage: bun orchestrator/pretrain.ts [--n ${DEFAULT_PRETRAIN_TASKS_PER_AGENT}] [--max-iters ${DEFAULT_PRETRAIN_MAX_ITERS}] [--list-tasks] [agent ...]
 
-  --n N           number of dry-run tasks per agent (default 2)
-  --max-iters M   max wake/review iterations per task (default 3)
-  agent ...       optional agent names to pretrain (default: all agents)`);
+  --n N            unique dry-run tasks per agent (default ${DEFAULT_PRETRAIN_TASKS_PER_AGENT})
+  --max-iters M    max wake/review iterations per task (default ${DEFAULT_PRETRAIN_MAX_ITERS})
+  --list-tasks     print the pretrain task catalog and exit
+  agent ...        optional agent names to pretrain (default: all agents)
+
+Pool: ${TEMPLATES.length} hard real-life tasks; reservations are all >= ${MIN_PRETRAIN_RESERVATION.toLocaleString("en-US")}.`);
       process.exit(0);
     } else if (argv[i].startsWith("-")) {
       throw new Error(`unknown option: ${argv[i]}`);
@@ -127,7 +116,15 @@ function parseArgs(argv: string[]): { n: number; maxIters: number; agents: strin
       agents.push(argv[i]);
     }
   }
-  return { n, maxIters, agents };
+  return { n, maxIters, agents, listTasks };
+}
+
+function printTaskCatalog(): void {
+  console.log(`Pretrain task catalog: ${TEMPLATES.length} unique hard tasks`);
+  for (const [i, t] of TEMPLATES.entries()) {
+    console.log(`${String(i + 1).padStart(2, "0")}. ${t.slug} [${t.domain}] reservation=${t.reservation.toLocaleString("en-US")} check=\`${t.check}\``);
+    console.log(`    ${t.title}`);
+  }
 }
 
 function logPrefixed(prefix: string, content: string, color: (s: string) => string = (s) => s): void {
@@ -152,6 +149,35 @@ async function ensureMarketDirs(): Promise<void> {
   for (const sub of ["tasks", "bids", "assignments", "review_requests", "review_responses", "pending_summaries"]) {
     await mkdir(`${MARKET}/${sub}`, { recursive: true });
   }
+  await mkdir(`${ROOT}/orchestrator/private`, { recursive: true });
+}
+
+async function loadReservations(): Promise<Record<string, number>> {
+  try {
+    const raw = await Bun.file(RESERVATIONS_PATH).json();
+    if (!raw || typeof raw !== "object") return {};
+    const out: Record<string, number> = {};
+    for (const [k, v] of Object.entries(raw as Record<string, unknown>)) {
+      if (typeof v === "number" && Number.isFinite(v)) out[k] = v;
+    }
+    return out;
+  } catch {
+    return {};
+  }
+}
+
+async function saveReservations(reservations: Record<string, number>): Promise<void> {
+  await mkdir(`${ROOT}/orchestrator/private`, { recursive: true });
+  await Bun.write(RESERVATIONS_PATH, JSON.stringify(reservations, null, 2));
+}
+
+async function setReservation(taskId: string, reservation: number): Promise<void> {
+  if (!Number.isInteger(reservation) || reservation < MIN_PRETRAIN_RESERVATION) {
+    throw new Error(`${taskId}: reservation must be >= ${MIN_PRETRAIN_RESERVATION}`);
+  }
+  const reservations = await loadReservations();
+  reservations[taskId] = reservation;
+  await saveReservations(reservations);
 }
 
 async function discoverAgents(): Promise<string[]> {
@@ -317,10 +343,10 @@ async function runPi(agent: string, plan: WakePlan, tokens: TokenMap): Promise<{
     // Avoid streaming stdout here. Bun 1.2.6 occasionally segfaults while
     // iterating long docker stdout streams from pi JSON mode; reading the pipe
     // as a single Response after process exit has been stable in reviewer paths.
-    const captured = await new Response(proc.stdout).text();
+    const captured = await new Response(proc.stdout as ReadableStream<Uint8Array>).text();
     for (const line of captured.split("\n")) handlePiEvent(agent, line);
 
-    const stderr = await new Response(proc.stderr).text();
+    const stderr = await new Response(proc.stderr as ReadableStream<Uint8Array>).text();
     const code = await proc.exited;
     if (code !== 0) console.error(red(`  [${agent}] pi exit ${code}: ${stderr.slice(0, 200)}`));
     return { usage: extractUsage(captured, model) };
@@ -358,10 +384,10 @@ async function runReview(task: Task, branch: string, seq: number, agent: string,
     authToken: reviewerToken,
     runTag: `${task.id}-${agent}-${seq}`,
   });
-  const out = await new Response(proc.stdout).text();
+  const out = await new Response(proc.stdout as ReadableStream<Uint8Array>).text();
   const code = await proc.exited;
   if (code !== 0) {
-    const stderr = await new Response(proc.stderr).text();
+    const stderr = await new Response(proc.stderr as ReadableStream<Uint8Array>).text();
     return { lgtm: false, feedback: `reviewer error (exit ${code}): ${stderr.slice(0, 500)}` };
   }
   const trimmed = out.trim();
@@ -457,20 +483,23 @@ async function pretrainOne(
     description: template.description,
     repo: PLAYGROUND,
     base_branch: "main",
-    review_fee: 2000,
+    review_fee: template.reviewFee,
     deterministic_checks: checks,
+    subjective_criteria: template.subjectiveCriteria,
     status: "open",
     posted_by: "operator",
     posted_at: now.toISOString(),
     deadline_at: new Date(now.getTime() + 2 * 60_000).toISOString(),
   });
   await Bun.write(`${MARKET}/tasks/${taskId}.json`, JSON.stringify(openTask, null, 2));
+  await setReservation(taskId, template.reservation);
 
-  console.log(yellow(`dry-run ${taskId} (${template.module}) → ${agent} [bidding]`));
+  console.log(yellow(`dry-run ${taskId} (${template.slug}/${template.domain}, reserve ${template.reservation.toLocaleString()}) → ${agent} [bidding]`));
 
   // Phase 1: bidding wake. Agent sees the open auction and (we hope)
   // places a bid. Pretrain waits for the wake to finish, then settles
-  // the auction immediately using whatever the agent bid.
+  // the auction immediately. With one valid bidder, live reverse-Vickrey
+  // settlement pays the reservation price, not the agent's own bid.
   const biddingAt = new Date();
   const biddingPlan = await buildWakePlan(agent);
   console.log(brightMagenta(`  → bidding wake ${agent}`));
@@ -494,7 +523,16 @@ async function pretrainOne(
   }
 
   const bid = BidSchema.parse(await Bun.file(bidPath).json());
+  if (bid.price > template.reservation) {
+    console.log(brightRed(`  ${taskId}: ${agent} bid ${bid.price.toLocaleString()} above reservation ${template.reservation.toLocaleString()} — expiring`));
+    const expired: Task = { ...openTask, status: "expired" };
+    await Bun.write(`${MARKET}/tasks/${taskId}.json`, JSON.stringify(expired, null, 2));
+    await recordEvent(agent, new Date(), `task ${taskId} expired — bid ${bid.price} above reservation ${template.reservation}`);
+    return;
+  }
+
   const settleAt = new Date();
+  const payment = template.reservation;
 
   // Clone the task repo into the agent's work dir so they can branch
   // and commit there in isolation, and the reviewer reads from the
@@ -505,14 +543,14 @@ async function pretrainOne(
   const assignment = {
     task_id: taskId,
     winner: agent,
-    payment: bid.price,
+    payment,
     assigned_at: settleAt.toISOString(),
   };
   await Bun.write(`${MARKET}/assignments/${taskId}.json`, JSON.stringify(assignment, null, 2));
   const assignedTask: Task = { ...openTask, status: "assigned" };
   await Bun.write(`${MARKET}/tasks/${taskId}.json`, JSON.stringify(assignedTask, null, 2));
-  await recordEvent(agent, settleAt, `won task ${taskId} at ${bid.price} (1 valid bids)`);
-  console.log(brightGreen(`  ${taskId}: ${agent} wins (paid ${bid.price})`));
+  await recordEvent(agent, settleAt, `won task ${taskId} at ${payment} (your bid: ${bid.price}; reserve ${template.reservation}; 1 valid bid)`);
+  console.log(brightGreen(`  ${taskId}: ${agent} wins (bid ${bid.price.toLocaleString()}, paid ${payment.toLocaleString()}, reserve ${template.reservation.toLocaleString()})`));
 
   // Phase 2: work wakes + review iterations.
   const taskStartMs = Date.now();
@@ -565,7 +603,7 @@ async function pretrainOne(
 
     if (r.lgtm) {
       const lgtmAt = new Date();
-      credit(ledger, agent, bid.price, `Accepted: ${taskId}`);
+      credit(ledger, agent, payment, `Accepted: ${taskId}`);
       await saveLedger(ledger);
       await syncBalances(ledger);
       const summary = summarizeWindow(ledger, agent, new Date(assignedTask.posted_at), lgtmAt);
@@ -575,7 +613,7 @@ async function pretrainOne(
         lgtmAt,
         `task ${taskId} completed — paid ${summary.received}, cost ${totalCost} (thinking ${summary.thinking}, review fees ${summary.reviewFees}), net ${summary.net}\n${formatFinancialOutcome(summary.net)}`
       );
-      console.log(brightGreen(`  ${taskId}: LGTM → +${bid.price} to ${agent}`));
+      console.log(brightGreen(`  ${taskId}: LGTM → +${payment.toLocaleString()} to ${agent}`));
       lgtm = true;
       break;
     }
@@ -587,14 +625,20 @@ async function pretrainOne(
 }
 
 async function main(): Promise<void> {
-  const { n, maxIters, agents: requestedAgents } = parseArgs(process.argv.slice(2));
+  const { n, maxIters, agents: requestedAgents, listTasks } = parseArgs(process.argv.slice(2));
+
+  if (listTasks) {
+    printTaskCatalog();
+    return;
+  }
 
   if (await isWatcherRunning()) {
     console.error(red("Watcher is running. Stop it before pretraining (otherwise it will debit balances and double-handle reviews)."));
     process.exit(1);
   }
 
-  console.log(bold(`Pretrain: ${n} task(s) per agent, max ${maxIters} iter(s) per task`));
+  console.log(bold(`Pretrain: ${n} unique hard task(s) per agent, max ${maxIters} iter(s) per task`));
+  console.log(dim(`Pool: ${TEMPLATES.length} tasks, min reservation ${MIN_PRETRAIN_RESERVATION.toLocaleString()}, reset balance ${DEFAULT_STARTING_BALANCE.toLocaleString()}`));
   await ensureMarketDirs();
 
   const discoveredAgents = await discoverAgents();
@@ -606,6 +650,12 @@ async function main(): Promise<void> {
   }
   console.log(cyan(`Agents: ${agents.join(", ")}`));
 
+  const requiredTasks = agents.length * n;
+  if (requiredTasks > TEMPLATES.length) {
+    console.error(red(`Need ${requiredTasks} unique pretrain tasks (${agents.length} agent(s) × ${n}), but pool has ${TEMPLATES.length}. Lower --n or add more templates.`));
+    process.exit(1);
+  }
+
   const ledger = await loadLedger();
   for (const a of agents) initAgent(ledger, a);
   const persist = async () => {
@@ -614,10 +664,6 @@ async function main(): Promise<void> {
   };
   setLedgerAccess(ledger, persist);
   await persist();
-
-  if (n > TEMPLATES.length) {
-    console.warn(yellow(`Pool has ${TEMPLATES.length} templates; n=${n} will reuse some.`));
-  }
 
   // Bring up the same isolation infrastructure the watcher uses: an
   // RPC server (so the extension's tool calls work) and an egress
@@ -641,10 +687,11 @@ async function main(): Promise<void> {
 
   try {
     let cursor = 0;
-    for (const agent of agents) {
-      for (let i = 0; i < n; i++) {
-        const tpl = TEMPLATES[cursor % TEMPLATES.length];
-        cursor++;
+    // Round-major scheduling: every agent gets a different task in each
+    // difficulty/domain band before any agent receives its next task.
+    for (let i = 0; i < n; i++) {
+      for (const agent of agents) {
+        const tpl = TEMPLATES[cursor++];
         await pretrainOne(agent, tpl, maxIters, ledger, tokens);
       }
     }
@@ -655,11 +702,11 @@ async function main(): Promise<void> {
     // Always restore balances even if a task threw mid-flight.
     // History is left in place so summarizeWindow keeps working.
     for (const a of agents) {
-      if (ledger[a]) ledger[a].balance = 1_000_000;
+      if (ledger[a]) ledger[a].balance = DEFAULT_STARTING_BALANCE;
     }
     await saveLedger(ledger);
     await syncBalances(ledger);
-    console.log(brightGreen(`Pretrain complete. Balances reset to 1,000,000.`));
+    console.log(brightGreen(`Pretrain complete. Balances reset to ${DEFAULT_STARTING_BALANCE.toLocaleString()} tokens.`));
   }
 }
 
