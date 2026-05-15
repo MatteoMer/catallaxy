@@ -22,12 +22,7 @@ interface TaskSpec {
 
 export const MIN_PRETRAIN_RESERVATION = 5_000_000;
 export const DEFAULT_PRETRAIN_TASKS_PER_AGENT = 8;
-export const DEFAULT_PRETRAIN_MAX_ITERS = 6;
 export const DEFAULT_PRETRAIN_REVIEW_FEE = 50_000;
-
-function tokens(n: number): string {
-  return n.toLocaleString("en-US");
-}
 
 function makeTask(spec: TaskSpec): PretrainTaskTemplate {
   if (!Number.isInteger(spec.reservation) || spec.reservation < MIN_PRETRAIN_RESERVATION) {
@@ -38,7 +33,6 @@ function makeTask(spec: TaskSpec): PretrainTaskTemplate {
     `[pretrain:${spec.slug}] ${spec.title}.`,
     "",
     `Build this as a production-grade, real-life task under \`${dir}/\`. The existing repository may contain unrelated stale files from other experiments; do not depend on them and do not modify them unless the task explicitly requires it.`,
-    `Reservation price: ${tokens(spec.reservation)} tokens. This is intentionally high; bid only if you can complete the whole task profitably after thinking + review costs.`,
     "",
     "Requirements:",
     ...spec.requirements.map((r, i) => `${i + 1}. ${r}`),

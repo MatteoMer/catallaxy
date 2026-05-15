@@ -27,11 +27,11 @@
  * new task/assignment files and debit review fees.
  *
  * Usage:
- *   bun orchestrator/pretrain.ts [--n 8] [--max-iters 6] [--list-tasks] [agent ...]
+ *   bun orchestrator/pretrain.ts [--n 8] [--list-tasks] [agent ...]
  */
 
 import { existsSync } from "node:fs";
-import { mkdir, readdir, stat } from "node:fs/promises";
+import { mkdir, readdir, rm, stat } from "node:fs/promises";
 import {
   TaskSchema,
   AssignmentSchema,
@@ -43,7 +43,7 @@ import {
 } from "./schemas";
 import {
   extractUsage, recordWakeup, recordEvent,
-  loadLedger, saveLedger, syncBalances, initAgent, debit, credit,
+  loadLedger, saveLedger, syncBalances, initAgent, debit, debitReviewFee, credit,
   summarizeWindow, formatFinancialOutcome, DEFAULT_STARTING_BALANCE,
   type AgentUsage, type Ledger,
 } from "./ledger";
@@ -62,7 +62,6 @@ import {
   green, magenta, red, yellow, blue,
 } from "./log";
 import {
-  DEFAULT_PRETRAIN_MAX_ITERS,
   DEFAULT_PRETRAIN_TASKS_PER_AGENT,
   MIN_PRETRAIN_RESERVATION,
   PRETRAIN_TASKS as TEMPLATES,
@@ -77,10 +76,13 @@ const PLAYGROUND = `${ROOT}/repos/playground`;
 const EXTENSION = `${ROOT}/extensions/catallaxy.ts`;
 
 const RESERVATIONS_PATH = `${ROOT}/orchestrator/private/reservations.json`;
+const PRETRAIN_WAKE_TIMEOUT_MS = parseInt(
+  process.env.PRETRAIN_WAKE_TIMEOUT_MS ?? process.env.AGENT_WAKE_TIMEOUT_MS ?? String(20 * 60_000),
+  10
+);
 
 interface PretrainArgs {
   n: number;
-  maxIters: number;
   agents: string[];
   listTasks: boolean;
 }
@@ -94,18 +96,15 @@ function parsePositiveInt(value: string | undefined, name: string): number {
 
 function parseArgs(argv: string[]): PretrainArgs {
   let n = DEFAULT_PRETRAIN_TASKS_PER_AGENT;
-  let maxIters = DEFAULT_PRETRAIN_MAX_ITERS;
   let listTasks = false;
   const agents: string[] = [];
   for (let i = 0; i < argv.length; i++) {
     if (argv[i] === "--n") n = parsePositiveInt(argv[++i], "--n");
-    else if (argv[i] === "--max-iters") maxIters = parsePositiveInt(argv[++i], "--max-iters");
     else if (argv[i] === "--list-tasks") listTasks = true;
     else if (argv[i] === "-h" || argv[i] === "--help") {
-      console.log(`Usage: bun orchestrator/pretrain.ts [--n ${DEFAULT_PRETRAIN_TASKS_PER_AGENT}] [--max-iters ${DEFAULT_PRETRAIN_MAX_ITERS}] [--list-tasks] [agent ...]
+      console.log(`Usage: bun orchestrator/pretrain.ts [--n ${DEFAULT_PRETRAIN_TASKS_PER_AGENT}] [--list-tasks] [agent ...]
 
   --n N            unique dry-run tasks per agent (default ${DEFAULT_PRETRAIN_TASKS_PER_AGENT})
-  --max-iters M    max review submissions per task; stalled work wakes are capped separately (default ${DEFAULT_PRETRAIN_MAX_ITERS})
   --list-tasks     print the pretrain task catalog and exit
   agent ...        optional agent names to pretrain (default: all agents)
 
@@ -117,7 +116,7 @@ Pool: ${TEMPLATES.length} hard real-life tasks; reservations are all >= ${MIN_PR
       agents.push(argv[i]);
     }
   }
-  return { n, maxIters, agents, listTasks };
+  return { n, agents, listTasks };
 }
 
 function printTaskCatalog(): void {
@@ -325,20 +324,45 @@ async function buildWakePlan(agent: string): Promise<WakePlan> {
 
 let pretrainWakeCounter = 0;
 
-async function runPi(agent: string, plan: WakePlan, tokens: TokenMap): Promise<{ usage: AgentUsage }> {
+function spawnIgnore(args: string[]): void {
+  const p = Bun.spawn(args, { stdout: "ignore", stderr: "ignore" });
+  void p.exited.catch(() => {});
+}
+
+function stopWakeProcess(proc: ReturnType<typeof Bun.spawn>, agent: string, runTag: string): void {
+  const containerName = `catallaxy-agent-${agent}-${runTag}`;
+  try { proc.kill("SIGTERM"); } catch {}
+  spawnIgnore(["docker", "rm", "-f", containerName]);
+  spawnIgnore(["pkill", "-TERM", "-f", containerName]);
+  setTimeout(() => {
+    try { proc.kill("SIGKILL"); } catch {}
+    spawnIgnore(["docker", "rm", "-f", containerName]);
+    spawnIgnore(["pkill", "-KILL", "-f", containerName]);
+  }, 2000);
+}
+
+async function runPi(agent: string, plan: WakePlan, tokens: TokenMap): Promise<{ usage: AgentUsage; timedOut: boolean }> {
   logPrefixed(`${agent}/wake-prompt`, plan.prompt, magenta);
   const token = tokens.byAgent.get(agent);
   if (!token) throw new Error(`no auth token for agent '${agent}'`);
   setWakeScope(agent, { kind: plan.kind, taskId: plan.taskId });
   const model = process.env.AGENT_MODEL ?? "openrouter/deepseek/deepseek-v4-flash";
+  const runTag = `pt${++pretrainWakeCounter}`;
   const proc = spawnAgent({
     agent,
     prompt: plan.prompt,
     model,
     tools: plan.tools,
     authToken: token,
-    runTag: `pt${++pretrainWakeCounter}`,
+    runTag,
   });
+
+  let timedOut = false;
+  const timeout = PRETRAIN_WAKE_TIMEOUT_MS > 0 ? setTimeout(() => {
+    timedOut = true;
+    console.log(brightRed(`    ${agent}: pretrain ${plan.kind} wake timed out after ${PRETRAIN_WAKE_TIMEOUT_MS}ms; killing wake`));
+    stopWakeProcess(proc, agent, runTag);
+  }, PRETRAIN_WAKE_TIMEOUT_MS) : undefined;
 
   try {
     // Avoid streaming stdout here. Bun 1.2.6 occasionally segfaults while
@@ -349,9 +373,10 @@ async function runPi(agent: string, plan: WakePlan, tokens: TokenMap): Promise<{
 
     const stderr = await new Response(proc.stderr as ReadableStream<Uint8Array>).text();
     const code = await proc.exited;
-    if (code !== 0) console.error(red(`  [${agent}] pi exit ${code}: ${stderr.slice(0, 200)}`));
-    return { usage: extractUsage(captured, model) };
+    if (code !== 0 && !timedOut) console.error(red(`  [${agent}] pi exit ${code}: ${stderr.slice(0, 200)}`));
+    return { usage: extractUsage(captured, model), timedOut };
   } finally {
+    if (timeout) clearTimeout(timeout);
     clearWakeScope(agent);
   }
 }
@@ -468,10 +493,198 @@ async function findReviewRequestsAfter(taskId: string, agent: string, sinceMs: n
   return out.sort((a, b) => a.seq - b.seq);
 }
 
+async function findPendingReviewRequest(taskId: string, agent: string): Promise<ReviewReq | null> {
+  const dir = `${MARKET}/review_requests`;
+  let files: string[];
+  try { files = await readdir(dir); } catch { return null; }
+  const reqs: ReviewReq[] = [];
+  for (const f of files) {
+    if (!f.endsWith(".json")) continue;
+    if (!f.startsWith(`${taskId}-${agent}-`)) continue;
+    try { reqs.push(await Bun.file(`${dir}/${f}`).json()); } catch {}
+  }
+  reqs.sort((a, b) => a.seq - b.seq);
+  for (const r of reqs) {
+    if (!existsSync(`${MARKET}/review_responses/${taskId}-${agent}-${r.seq}.json`)) return r;
+  }
+  return null;
+}
+
+function reviewFeeDebited(ledger: Ledger, agent: string, taskId: string, seq: number): boolean {
+  const entry = ledger[agent];
+  if (!entry) return false;
+  return entry.history.some((h) => h.description === `Review fee: ${taskId} #${seq}`);
+}
+
+async function processPretrainReview(
+  agent: string,
+  task: Task,
+  req: ReviewReq,
+  payment: number,
+  ledger: Ledger,
+  tokens: TokenMap
+): Promise<boolean> {
+  if (!reviewFeeDebited(ledger, agent, task.id, req.seq)) {
+    debitReviewFee(ledger, agent, task.review_fee, `Review fee: ${task.id} #${req.seq}`);
+    await saveLedger(ledger);
+    await syncBalances(ledger);
+    console.log(red(`    review ${task.id} #${req.seq}: -${task.review_fee} from ${agent}`));
+  } else {
+    console.log(dim(`    review ${task.id} #${req.seq}: fee already debited`));
+  }
+
+  const r = await runReview(task, req.branch, req.seq, agent, tokens.byAgent.get(REVIEWER_PRINCIPAL)!);
+
+  await Bun.write(
+    `${MARKET}/review_responses/${task.id}-${agent}-${req.seq}.json`,
+    JSON.stringify({
+      task_id: task.id,
+      agent,
+      seq: req.seq,
+      verdict: r.lgtm ? "lgtm" : "needs_work",
+      feedback: r.feedback,
+      reviewed_at: new Date().toISOString(),
+    }, null, 2)
+  );
+
+  if (!r.lgtm) {
+    console.log(brightRed(`  ${task.id}: needs_work (#${req.seq}); follow-up wake does not count as a review round until another review is requested`));
+    return false;
+  }
+
+  const lgtmAt = new Date();
+  credit(ledger, agent, payment, `Accepted: ${task.id}`, lgtmAt);
+  await saveLedger(ledger);
+  await syncBalances(ledger);
+  const summary = summarizeWindow(ledger, agent, new Date(task.posted_at), lgtmAt);
+  const totalCost = summary.thinking + summary.reviewFees;
+  await recordEvent(
+    agent,
+    lgtmAt,
+    `task ${task.id} completed — paid ${summary.received}, cost ${totalCost} (thinking ${summary.thinking}, review fees ${summary.reviewFees}), net ${summary.net}\n${formatFinancialOutcome(summary.net)}`
+  );
+  const completed: Task = { ...task, status: "completed" };
+  await Bun.write(`${MARKET}/tasks/${task.id}.json`, JSON.stringify(completed, null, 2));
+  console.log(brightGreen(`  ${task.id}: LGTM → +${payment.toLocaleString()} to ${agent}`));
+  return true;
+}
+
+async function workAssignedTaskUntilLgtm(
+  agent: string,
+  assignedTask: Task,
+  payment: number,
+  ledger: Ledger,
+  tokens: TokenMap
+): Promise<void> {
+  let lgtm = false;
+  let reviewRounds = 0;
+  let workWakes = 0;
+  let noReviewWakes = 0;
+  let wakeTimeouts = 0;
+
+  while (!lgtm) {
+    const pending = await findPendingReviewRequest(assignedTask.id, agent);
+    if (pending) {
+      reviewRounds = Math.max(reviewRounds, pending.seq + 1);
+      lgtm = await processPretrainReview(agent, assignedTask, pending, payment, ledger, tokens);
+      continue;
+    }
+
+    const attempt = workWakes + wakeTimeouts + 1;
+    const at = new Date();
+    const plan = await buildWakePlan(agent);
+    console.log(brightMagenta(`  → work wake ${agent} (attempt ${attempt}, completed wakes ${workWakes}, reviews ${reviewRounds})`));
+
+    const { usage, timedOut } = await runPi(agent, plan, tokens);
+    const ctx = await gatherWakeContext(agent, at);
+    if (usage.totalTokens > 0) {
+      debit(ledger, agent, usage.billableTokens, `Wakeup: ${usage.billableTokens} billable tok (raw ${usage.totalTokens}tok, $${usage.costUsd.toFixed(4)})`, at);
+    }
+    await recordWakeup(agent, at, usage, ctx);
+    await saveLedger(ledger);
+    await syncBalances(ledger);
+
+    console.log(dim(`    ${agent}: -${usage.billableTokens.toLocaleString()} billable tokens (raw ${usage.totalTokens.toLocaleString()}, $${usage.costUsd.toFixed(4)})`));
+
+    const newReq = await findPendingReviewRequest(assignedTask.id, agent);
+    if (!newReq) {
+      if (timedOut) {
+        wakeTimeouts++;
+        console.log(dim(`    work wake timed out without review_request; retrying same assignment (timeout ${wakeTimeouts}, not counted as an iteration)`));
+        continue;
+      }
+      workWakes++;
+      noReviewWakes++;
+      wakeTimeouts = 0;
+      console.log(dim(`    no review_request from this wake (no-review wake ${noReviewWakes}); retrying same assignment`));
+      continue;
+    }
+
+    workWakes++;
+    noReviewWakes = 0;
+    wakeTimeouts = 0;
+    reviewRounds++;
+    console.log(red(`    review ${assignedTask.id} #${newReq.seq} (round ${reviewRounds})`));
+    lgtm = await processPretrainReview(agent, assignedTask, newReq, payment, ledger, tokens);
+  }
+}
+
+async function currentAssignedTasks(agent: string): Promise<{ task: Task; payment: number }[]> {
+  let files: string[];
+  try { files = await readdir(`${MARKET}/assignments`); } catch { return []; }
+  const out: { task: Task; payment: number; assignedAt: string }[] = [];
+  for (const f of files) {
+    if (!f.endsWith(".json")) continue;
+    try {
+      const assignment = AssignmentSchema.parse(await Bun.file(`${MARKET}/assignments/${f}`).json());
+      if (assignment.winner !== agent) continue;
+      const task = TaskSchema.parse(await Bun.file(`${MARKET}/tasks/${assignment.task_id}.json`).json());
+      if (task.status === "assigned") out.push({ task, payment: assignment.payment, assignedAt: assignment.assigned_at });
+    } catch {}
+  }
+  return out.sort((a, b) => a.assignedAt.localeCompare(b.assignedAt)).map(({ task, payment }) => ({ task, payment }));
+}
+
+async function finishCurrentAssignments(agent: string, ledger: Ledger, tokens: TokenMap): Promise<void> {
+  for (;;) {
+    const assigned = await currentAssignedTasks(agent);
+    if (!assigned.length) return;
+    const first = assigned[0];
+    console.log(yellow(`resuming assigned ${first.task.id} → ${agent} before posting new pretrain task`));
+    await workAssignedTaskUntilLgtm(agent, first.task, first.payment, ledger, tokens);
+  }
+}
+
+function pretrainSlugFromDescription(description: string): string | null {
+  return description.match(/^\[pretrain:([^\]]+)\]/)?.[1] ?? null;
+}
+
+async function usedPretrainSlugs(): Promise<Set<string>> {
+  const used = new Set<string>();
+  for (const f of await readdir(`${MARKET}/tasks`).catch(() => [] as string[])) {
+    if (!f.endsWith(".json")) continue;
+    try {
+      const t = TaskSchema.parse(await Bun.file(`${MARKET}/tasks/${f}`).json());
+      const slug = pretrainSlugFromDescription(t.description);
+      if (slug) used.add(slug);
+    } catch {}
+  }
+  return used;
+}
+
+function nextUnusedTemplate(used: Set<string>, cursor: { value: number }): Template | null {
+  while (cursor.value < TEMPLATES.length) {
+    const tpl = TEMPLATES[cursor.value++];
+    if (used.has(tpl.slug)) continue;
+    used.add(tpl.slug);
+    return tpl;
+  }
+  return null;
+}
+
 async function pretrainOne(
   agent: string,
   template: Template,
-  maxIters: number,
   ledger: Ledger,
   tokens: TokenMap
 ): Promise<void> {
@@ -479,7 +692,7 @@ async function pretrainOne(
   const now = new Date();
 
   const checks: DeterministicCheck[] = [{ type: "command", cmd: template.check, must_pass: true }];
-  const openTask: Task = TaskSchema.parse({
+  let openTask: Task = TaskSchema.parse({
     id: taskId,
     description: template.description,
     repo: PLAYGROUND,
@@ -501,35 +714,64 @@ async function pretrainOne(
   // places a bid. Pretrain waits for the wake to finish, then settles
   // the auction immediately. With one valid bidder, live reverse-Vickrey
   // settlement pays the reservation price, not the agent's own bid.
-  const biddingAt = new Date();
-  const biddingPlan = await buildWakePlan(agent);
-  console.log(brightMagenta(`  → bidding wake ${agent}`));
-  const { usage: bidUsage } = await runPi(agent, biddingPlan, tokens);
-  const bidCtx = await gatherWakeContext(agent, biddingAt);
-  if (bidUsage.totalTokens > 0) {
-    debit(ledger, agent, bidUsage.billableTokens, `Wakeup: ${bidUsage.billableTokens} billable tok (raw ${bidUsage.totalTokens}tok, $${bidUsage.costUsd.toFixed(4)})`, biddingAt);
-  }
-  await recordWakeup(agent, biddingAt, bidUsage, bidCtx);
-  await saveLedger(ledger);
-  await syncBalances(ledger);
-  console.log(dim(`    ${agent}: -${bidUsage.billableTokens.toLocaleString()} billable tokens (raw ${bidUsage.totalTokens.toLocaleString()}, $${bidUsage.costUsd.toFixed(4)})`));
-
   const bidPath = `${MARKET}/bids/${taskId}-${agent}.json`;
-  if (!existsSync(bidPath)) {
-    console.log(brightRed(`  ${taskId}: ${agent} did not bid — skipping work phase`));
-    const expired: Task = { ...openTask, status: "expired" };
-    await Bun.write(`${MARKET}/tasks/${taskId}.json`, JSON.stringify(expired, null, 2));
-    await recordEvent(agent, new Date(), `task ${taskId} expired — no valid bid`);
-    return;
-  }
+  let bidTimeouts = 0;
+  let noBidWakes = 0;
+  let aboveReservationBids = 0;
+  let bid: ReturnType<typeof BidSchema.parse> | null = null;
 
-  const bid = BidSchema.parse(await Bun.file(bidPath).json());
-  if (bid.price > template.reservation) {
-    console.log(brightRed(`  ${taskId}: ${agent} bid ${bid.price.toLocaleString()} above reservation ${template.reservation.toLocaleString()} — expiring`));
-    const expired: Task = { ...openTask, status: "expired" };
-    await Bun.write(`${MARKET}/tasks/${taskId}.json`, JSON.stringify(expired, null, 2));
-    await recordEvent(agent, new Date(), `task ${taskId} expired — bid ${bid.price} above reservation ${template.reservation}`);
-    return;
+  const repostForBid = async (reason: string): Promise<void> => {
+    const at = new Date();
+    openTask = TaskSchema.parse({
+      ...openTask,
+      status: "open",
+      posted_at: at.toISOString(),
+      deadline_at: new Date(at.getTime() + 2 * 60_000).toISOString(),
+    });
+    await Bun.write(`${MARKET}/tasks/${taskId}.json`, JSON.stringify(openTask, null, 2));
+    await recordEvent(agent, at, `task ${taskId} reposted for bidding — ${reason}`);
+  };
+
+  while (!bid) {
+    if (!existsSync(bidPath)) {
+      const biddingAt = new Date();
+      const biddingPlan = await buildWakePlan(agent);
+      console.log(brightMagenta(`  → bidding wake ${agent}${bidTimeouts ? ` (retry after timeout ${bidTimeouts})` : ""}`));
+      const { usage: bidUsage, timedOut } = await runPi(agent, biddingPlan, tokens);
+      const bidCtx = await gatherWakeContext(agent, biddingAt);
+      if (bidUsage.totalTokens > 0) {
+        debit(ledger, agent, bidUsage.billableTokens, `Wakeup: ${bidUsage.billableTokens} billable tok (raw ${bidUsage.totalTokens}tok, $${bidUsage.costUsd.toFixed(4)})`, biddingAt);
+      }
+      await recordWakeup(agent, biddingAt, bidUsage, bidCtx);
+      await saveLedger(ledger);
+      await syncBalances(ledger);
+      console.log(dim(`    ${agent}: -${bidUsage.billableTokens.toLocaleString()} billable tokens (raw ${bidUsage.totalTokens.toLocaleString()}, $${bidUsage.costUsd.toFixed(4)})`));
+
+      if (!existsSync(bidPath)) {
+        if (timedOut) {
+          bidTimeouts++;
+          console.log(dim(`    bidding wake timed out without bid; reposting same auction (timeout ${bidTimeouts}, not counted as an iteration)`));
+          await repostForBid("wake timed out without bid");
+          continue;
+        }
+
+        noBidWakes++;
+        console.log(dim(`    no bid placed; reposting same auction (no-bid wake ${noBidWakes})`));
+        await repostForBid("no bid placed");
+        continue;
+      }
+    }
+
+    const candidate = BidSchema.parse(await Bun.file(bidPath).json());
+    if (candidate.price > template.reservation) {
+      aboveReservationBids++;
+      await rm(bidPath, { force: true });
+      console.log(brightRed(`  ${taskId}: ${agent} bid ${candidate.price.toLocaleString()} above reservation ${template.reservation.toLocaleString()} — reposting same auction (above-reservation bid ${aboveReservationBids})`));
+      await recordEvent(agent, new Date(), `task ${taskId} bid ${candidate.price} above reservation ${template.reservation}; reposting`);
+      await repostForBid("bid above reservation");
+      continue;
+    }
+    bid = candidate;
   }
 
   const settleAt = new Date();
@@ -553,99 +795,11 @@ async function pretrainOne(
   await recordEvent(agent, settleAt, `won task ${taskId} at ${payment} (your bid: ${bid.price}; reserve ${template.reservation}; 1 valid bid)`);
   console.log(brightGreen(`  ${taskId}: ${agent} wins (bid ${bid.price.toLocaleString()}, paid ${payment.toLocaleString()}, reserve ${template.reservation.toLocaleString()})`));
 
-  // Phase 2: work wakes + review rounds.
-  // `maxIters` caps actual review submissions, not every model wake.
-  // A needs_work response just feeds the next work wake; that follow-up
-  // wake is not counted unless it submits another review request. Separate
-  // stall guards keep pretrain from looping forever when an agent keeps
-  // working without requesting review.
-  const taskStartMs = Date.now();
-  let lgtm = false;
-  const reviewedSeqs = new Set<number>();
-  let reviewRounds = 0;
-  let workWakes = 0;
-  let noReviewWakes = 0;
-  const maxNoReviewWakes = Math.max(2, maxIters);
-  const maxWorkWakes = maxIters + maxNoReviewWakes;
-
-  while (reviewRounds < maxIters && noReviewWakes < maxNoReviewWakes && workWakes < maxWorkWakes) {
-    workWakes++;
-    const at = new Date();
-    const plan = await buildWakePlan(agent);
-    console.log(brightMagenta(`  → work wake ${agent} (wake ${workWakes}, reviews ${reviewRounds}/${maxIters})`));
-
-    const { usage } = await runPi(agent, plan, tokens);
-    const ctx = await gatherWakeContext(agent, at);
-    if (usage.totalTokens > 0) {
-      debit(ledger, agent, usage.billableTokens, `Wakeup: ${usage.billableTokens} billable tok (raw ${usage.totalTokens}tok, $${usage.costUsd.toFixed(4)})`, at);
-    }
-    await recordWakeup(agent, at, usage, ctx);
-    await saveLedger(ledger);
-    await syncBalances(ledger);
-
-    console.log(dim(`    ${agent}: -${usage.billableTokens.toLocaleString()} billable tokens (raw ${usage.totalTokens.toLocaleString()}, $${usage.costUsd.toFixed(4)})`));
-
-    const reqs = await findReviewRequestsAfter(taskId, agent, taskStartMs);
-    const newReq = reqs.find((r) => !reviewedSeqs.has(r.seq));
-    if (!newReq) {
-      noReviewWakes++;
-      console.log(dim(`    no review_request from this wake (${noReviewWakes}/${maxNoReviewWakes} stalled wake(s))`));
-      continue;
-    }
-
-    noReviewWakes = 0;
-    reviewedSeqs.add(newReq.seq);
-    reviewRounds++;
-    debit(ledger, agent, assignedTask.review_fee, `Review fee: ${taskId} #${newReq.seq}`);
-    await saveLedger(ledger);
-    await syncBalances(ledger);
-    console.log(red(`    review ${taskId} #${newReq.seq} (${reviewRounds}/${maxIters}): -${assignedTask.review_fee} from ${agent}`));
-
-    const r = await runReview(assignedTask, newReq.branch, newReq.seq, agent, tokens.byAgent.get(REVIEWER_PRINCIPAL)!);
-
-    await Bun.write(
-      `${MARKET}/review_responses/${taskId}-${agent}-${newReq.seq}.json`,
-      JSON.stringify({
-        task_id: taskId,
-        agent,
-        seq: newReq.seq,
-        verdict: r.lgtm ? "lgtm" : "needs_work",
-        feedback: r.feedback,
-        reviewed_at: new Date().toISOString(),
-      }, null, 2)
-    );
-
-    if (r.lgtm) {
-      const lgtmAt = new Date();
-      credit(ledger, agent, payment, `Accepted: ${taskId}`);
-      await saveLedger(ledger);
-      await syncBalances(ledger);
-      const summary = summarizeWindow(ledger, agent, new Date(assignedTask.posted_at), lgtmAt);
-      const totalCost = summary.thinking + summary.reviewFees;
-      await recordEvent(
-        agent,
-        lgtmAt,
-        `task ${taskId} completed — paid ${summary.received}, cost ${totalCost} (thinking ${summary.thinking}, review fees ${summary.reviewFees}), net ${summary.net}\n${formatFinancialOutcome(summary.net)}`
-      );
-      console.log(brightGreen(`  ${taskId}: LGTM → +${payment.toLocaleString()} to ${agent}`));
-      lgtm = true;
-      break;
-    }
-    console.log(brightRed(`  ${taskId}: needs_work (#${newReq.seq}); follow-up wake does not count as a review round until another review is requested`));
-  }
-
-  if (!lgtm) {
-    if (reviewRounds >= maxIters) console.log(dim(`  ${taskId}: review cap reached (${reviewRounds}/${maxIters})`));
-    else if (noReviewWakes >= maxNoReviewWakes) console.log(dim(`  ${taskId}: stalled without review_request (${noReviewWakes}/${maxNoReviewWakes})`));
-    else if (workWakes >= maxWorkWakes) console.log(dim(`  ${taskId}: work wake cap reached (${workWakes}/${maxWorkWakes})`));
-  }
-
-  const finalTask: Task = { ...assignedTask, status: lgtm ? "completed" : "expired" };
-  await Bun.write(`${MARKET}/tasks/${taskId}.json`, JSON.stringify(finalTask, null, 2));
+  await workAssignedTaskUntilLgtm(agent, assignedTask, payment, ledger, tokens);
 }
 
 async function main(): Promise<void> {
-  const { n, maxIters, agents: requestedAgents, listTasks } = parseArgs(process.argv.slice(2));
+  const { n, agents: requestedAgents, listTasks } = parseArgs(process.argv.slice(2));
 
   if (listTasks) {
     printTaskCatalog();
@@ -657,7 +811,7 @@ async function main(): Promise<void> {
     process.exit(1);
   }
 
-  console.log(bold(`Pretrain: ${n} unique hard task(s) per agent, max ${maxIters} review(s) per task`));
+  console.log(bold(`Pretrain: ${n} unique hard task(s) per agent; each task runs until LGTM`));
   console.log(dim(`Pool: ${TEMPLATES.length} tasks, min reservation ${MIN_PRETRAIN_RESERVATION.toLocaleString()}, reset balance ${DEFAULT_STARTING_BALANCE.toLocaleString()}`));
   await ensureMarketDirs();
   await ensurePretrainFixtures(TEMPLATES);
@@ -671,11 +825,8 @@ async function main(): Promise<void> {
   }
   console.log(cyan(`Agents: ${agents.join(", ")}`));
 
-  const requiredTasks = agents.length * n;
-  if (requiredTasks > TEMPLATES.length) {
-    console.error(red(`Need ${requiredTasks} unique pretrain tasks (${agents.length} agent(s) × ${n}), but pool has ${TEMPLATES.length}. Lower --n or add more templates.`));
-    process.exit(1);
-  }
+  const used = await usedPretrainSlugs();
+  console.log(dim(`Already posted pretrain slugs: ${used.size ? [...used].join(", ") : "none"}`));
 
   const ledger = await loadLedger();
   for (const a of agents) initAgent(ledger, a);
@@ -707,13 +858,20 @@ async function main(): Promise<void> {
   await startGateway();
 
   try {
-    let cursor = 0;
+    for (const agent of agents) await finishCurrentAssignments(agent, ledger, tokens);
+
+    const cursor = { value: 0 };
     // Round-major scheduling: every agent gets a different task in each
     // difficulty/domain band before any agent receives its next task.
-    for (let i = 0; i < n; i++) {
+    outer: for (let i = 0; i < n; i++) {
       for (const agent of agents) {
-        const tpl = TEMPLATES[cursor++];
-        await pretrainOne(agent, tpl, maxIters, ledger, tokens);
+        await finishCurrentAssignments(agent, ledger, tokens);
+        const tpl = nextUnusedTemplate(used, cursor);
+        if (!tpl) {
+          console.log(yellow("No unused pretrain templates remain; stopping."));
+          break outer;
+        }
+        await pretrainOne(agent, tpl, ledger, tokens);
       }
     }
   } finally {
