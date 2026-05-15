@@ -42,7 +42,7 @@ const AGENTS_DIR = process.env.AGENTS_DIR ?? "./agents";
 const MARKET = process.env.MARKET_DIR ?? "./market";
 const MIN_WAKE_INTERVAL_MS = parseInt(process.env.MIN_WAKE_INTERVAL_MS ?? "5000", 10);
 const RECONCILE_MS = parseInt(process.env.RECONCILE_MS ?? "60000", 10);
-const AGENT_WAKE_TIMEOUT_MS = parseInt(process.env.AGENT_WAKE_TIMEOUT_MS ?? String(10 * 60_000), 10);
+const AGENT_WAKE_TIMEOUT_MS = parseInt(process.env.AGENT_WAKE_TIMEOUT_MS ?? String(20 * 60_000), 10);
 // Bid wakes should only price auctions. Once at least this many successful
 // place_bid calls have happened, stop the pi process after the billed turn.
 // This prevents agents from burning their balance polling for settlement.
