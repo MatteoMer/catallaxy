@@ -42,7 +42,7 @@ import {
   type DeterministicCheck,
 } from "./schemas";
 import {
-  extractUsage, recordWakeup, recordEvent,
+  emptyUsage, addUsage, usageFromPiUsage, recordWakeup, recordEvent,
   loadLedger, saveLedger, syncBalances, initAgent, debit, debitReviewFee, credit,
   summarizeWindow, formatFinancialOutcome, DEFAULT_STARTING_BALANCE,
   type AgentUsage, type Ledger,
@@ -132,16 +132,94 @@ function logPrefixed(prefix: string, content: string, color: (s: string) => stri
   for (const line of content.split("\n")) console.log(`  ${tag} ${line}`);
 }
 
-function handlePiEvent(agent: string, line: string): void {
-  const trimmed = line.trim();
-  if (!trimmed) return;
-  let ev: any;
-  try { ev = JSON.parse(trimmed); } catch { return; }
+const STREAM_TAIL_CHARS = 8_192;
+const MAX_PI_JSON_LINE_CHARS = parseInt(process.env.PRETRAIN_MAX_PI_JSON_LINE_CHARS ?? String(64 * 1024 * 1024), 10);
+
+function handlePiEvent(agent: string, ev: any): void {
   if (ev.type !== "turn_end" || !ev.message?.content) return;
   for (const c of ev.message.content) {
     if (c.type === "thinking" && c.thinking) logPrefixed(`${agent}/thinks`, c.thinking, gray);
     else if (c.type === "text" && c.text) logPrefixed(`${agent}/says`, c.text, cyan);
     else if (c.type === "tool_use") logPrefixed(`${agent}/${c.name}`, JSON.stringify(c.input ?? {}), green);
+  }
+}
+
+function processPiJsonLine(agent: string, line: string, usage: AgentUsage, model: string): void {
+  const trimmed = line.trim();
+  if (!trimmed) return;
+  let ev: any;
+  try { ev = JSON.parse(trimmed); } catch { return; }
+  if (ev.type === "turn_end" && ev.message?.usage) addUsage(usage, usageFromPiUsage(ev.message.usage, model));
+  handlePiEvent(agent, ev);
+}
+
+async function readLines(stream: ReadableStream<Uint8Array>, onLine: (line: string) => void): Promise<void> {
+  const reader = stream.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  let droppingLongLine = false;
+
+  const feed = (text: string): void => {
+    let start = 0;
+    for (;;) {
+      const newline = text.indexOf("\n", start);
+      if (newline < 0) break;
+      const part = text.slice(start, newline);
+      if (droppingLongLine) {
+        droppingLongLine = false;
+      } else {
+        buffer += part;
+        onLine(buffer);
+      }
+      buffer = "";
+      start = newline + 1;
+    }
+
+    if (start >= text.length) return;
+    if (droppingLongLine) return;
+    buffer += text.slice(start);
+    if (buffer.length > MAX_PI_JSON_LINE_CHARS) {
+      console.error(red(`  [pretrain] dropping oversized pi JSON line (${buffer.length.toLocaleString()} chars)`));
+      buffer = "";
+      droppingLongLine = true;
+    }
+  };
+
+  try {
+    for (;;) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      if (value) feed(decoder.decode(value, { stream: true }));
+    }
+    feed(decoder.decode());
+    if (!droppingLongLine && buffer) onLine(buffer);
+  } finally {
+    reader.releaseLock();
+  }
+}
+
+async function readPiStdout(stream: ReadableStream<Uint8Array>, agent: string, model: string): Promise<AgentUsage> {
+  const usage = emptyUsage();
+  await readLines(stream, (line) => processPiJsonLine(agent, line, usage, model));
+  return usage;
+}
+
+async function readTextTail(stream: ReadableStream<Uint8Array>, maxChars = STREAM_TAIL_CHARS): Promise<string> {
+  const reader = stream.getReader();
+  const decoder = new TextDecoder();
+  let tail = "";
+  try {
+    for (;;) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      if (!value) continue;
+      tail += decoder.decode(value, { stream: true });
+      if (tail.length > maxChars) tail = tail.slice(-maxChars);
+    }
+    tail += decoder.decode();
+    return tail.length > maxChars ? tail.slice(-maxChars) : tail;
+  } finally {
+    reader.releaseLock();
   }
 }
 
@@ -365,16 +443,17 @@ async function runPi(agent: string, plan: WakePlan, tokens: TokenMap): Promise<{
   }, PRETRAIN_WAKE_TIMEOUT_MS) : undefined;
 
   try {
-    // Avoid streaming stdout here. Bun 1.2.6 occasionally segfaults while
-    // iterating long docker stdout streams from pi JSON mode; reading the pipe
-    // as a single Response after process exit has been stable in reviewer paths.
-    const captured = await new Response(proc.stdout as ReadableStream<Uint8Array>).text();
-    for (const line of captured.split("\n")) handlePiEvent(agent, line);
-
-    const stderr = await new Response(proc.stderr as ReadableStream<Uint8Array>).text();
-    const code = await proc.exited;
+    const stdout = readPiStdout(proc.stdout as ReadableStream<Uint8Array>, agent, model).catch((e) => {
+      if (timedOut) return emptyUsage();
+      throw e;
+    });
+    const stderrTail = readTextTail(proc.stderr as ReadableStream<Uint8Array>).catch((e) => {
+      if (timedOut) return "";
+      throw e;
+    });
+    const [usage, stderr, code] = await Promise.all([stdout, stderrTail, proc.exited]);
     if (code !== 0 && !timedOut) console.error(red(`  [${agent}] pi exit ${code}: ${stderr.slice(0, 200)}`));
-    return { usage: extractUsage(captured, model), timedOut };
+    return { usage, timedOut };
   } finally {
     if (timeout) clearTimeout(timeout);
     clearWakeScope(agent);
@@ -410,10 +489,12 @@ async function runReview(task: Task, branch: string, seq: number, agent: string,
     authToken: reviewerToken,
     runTag: `${task.id}-${agent}-${seq}`,
   });
-  const out = await new Response(proc.stdout as ReadableStream<Uint8Array>).text();
-  const code = await proc.exited;
+  const [out, stderr, code] = await Promise.all([
+    readTextTail(proc.stdout as ReadableStream<Uint8Array>, 1_000_000),
+    readTextTail(proc.stderr as ReadableStream<Uint8Array>),
+    proc.exited,
+  ]);
   if (code !== 0) {
-    const stderr = await new Response(proc.stderr as ReadableStream<Uint8Array>).text();
     return { lgtm: false, feedback: `reviewer error (exit ${code}): ${stderr.slice(0, 500)}` };
   }
   const trimmed = out.trim();
@@ -857,6 +938,7 @@ async function main(): Promise<void> {
   }
   await startGateway();
 
+  let completed = false;
   try {
     for (const agent of agents) await finishCurrentAssignments(agent, ledger, tokens);
 
@@ -874,6 +956,7 @@ async function main(): Promise<void> {
         await pretrainOne(agent, tpl, ledger, tokens);
       }
     }
+    completed = true;
   } finally {
     try { await stopGateway(); } catch {}
     try { await proxy?.stop(); } catch {}
@@ -885,7 +968,11 @@ async function main(): Promise<void> {
     }
     await saveLedger(ledger);
     await syncBalances(ledger);
-    console.log(brightGreen(`Pretrain complete. Balances reset to ${DEFAULT_STARTING_BALANCE.toLocaleString()} tokens.`));
+    if (completed) {
+      console.log(brightGreen(`Pretrain complete. Balances reset to ${DEFAULT_STARTING_BALANCE.toLocaleString()} tokens.`));
+    } else {
+      console.log(yellow(`Pretrain stopped before completion. Balances reset to ${DEFAULT_STARTING_BALANCE.toLocaleString()} tokens.`));
+    }
   }
 }
 
