@@ -36,7 +36,7 @@ export interface SpawnReviewerOpts {
   authToken: string;
   /** For container naming; e.g. task id + seq. */
   runTag: string;
-  /** Wall-clock cap (seconds). Default 120. */
+  /** Optional wall-clock cap (seconds). Undefined means no reviewer cap. */
   timeoutSec?: number;
 }
 
@@ -63,7 +63,7 @@ export function buildReviewerPiArgs(opts: SpawnReviewerOpts): string[] {
 }
 
 export function buildReviewerDockerArgs(opts: SpawnReviewerOpts, piArgs: string[]): string[] {
-  const timeout = opts.timeoutSec ?? 120;
+  const timeout = opts.timeoutSec;
   return [
     "docker", "run",
     "--rm", "-i",
@@ -78,7 +78,7 @@ export function buildReviewerDockerArgs(opts: SpawnReviewerOpts, piArgs: string[
     "--memory=2g",
     "--cpus=1",
     "--pids-limit=512",
-    "--stop-timeout", String(timeout),
+    ...(timeout ? ["--stop-timeout", String(timeout)] : []),
     ...(HARDENING_DISABLED || !CUSTOM_SECCOMP_PATH || !existsSync(CUSTOM_SECCOMP_PATH)
       ? []
       : ["--security-opt", `seccomp=${CUSTOM_SECCOMP_PATH}`]),
@@ -88,7 +88,7 @@ export function buildReviewerDockerArgs(opts: SpawnReviewerOpts, piArgs: string[
     "-e", `CATALLAXY_AUTH_TOKEN=${opts.authToken}`,
     "-w", "/work",
     IMAGE,
-    "timeout", String(timeout),
+    ...(timeout ? ["timeout", String(timeout)] : []),
     ...piArgs,
   ];
 }
