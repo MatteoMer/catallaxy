@@ -24,7 +24,6 @@ import { isLgtm } from "./lgtm";
 import { dim, red, brightRed, brightGreen, blue } from "./log";
 
 const MARKET = process.env.MARKET_DIR ?? "./market";
-const REVIEWER_TIMEOUT_MS = parseInt(process.env.REVIEWER_TIMEOUT_MS ?? String(120_000), 10);
 
 function reviewResponsePath(req: ReviewRequest): string {
   return `${MARKET}/review_responses/${req.task_id}-${req.agent}-${req.seq}.json`;
@@ -167,25 +166,11 @@ async function runReview(
     runTag: `${req.task_id}-${req.agent}-${req.seq}`,
   });
 
-  let timedOut = false;
-  const timeout = REVIEWER_TIMEOUT_MS > 0 ? setTimeout(() => {
-    timedOut = true;
-    try { proc.kill("SIGTERM"); } catch {}
-    setTimeout(() => { try { proc.kill("SIGKILL"); } catch {} }, 2_000);
-  }, REVIEWER_TIMEOUT_MS) : undefined;
-
   const [output, stderr, exitCode] = await Promise.all([
     new Response(proc.stdout as ReadableStream<Uint8Array>).text(),
     new Response(proc.stderr as ReadableStream<Uint8Array>).text(),
     proc.exited,
-  ]).finally(() => { if (timeout) clearTimeout(timeout); });
-
-  if (timedOut) {
-    return {
-      lgtm: false,
-      feedback: `reviewer timeout after ${REVIEWER_TIMEOUT_MS}ms`,
-    };
-  }
+  ]);
 
   if (exitCode !== 0) {
     return {
