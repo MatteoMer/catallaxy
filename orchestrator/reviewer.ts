@@ -6,6 +6,7 @@
  * Each review call debits review_fee upfront.
  */
 
+import { existsSync } from "node:fs";
 import { readdir } from "node:fs/promises";
 import {
   TaskSchema,
@@ -23,6 +24,17 @@ import { isLgtm } from "./lgtm";
 import { dim, red, brightRed, brightGreen, blue } from "./log";
 
 const MARKET = process.env.MARKET_DIR ?? "./market";
+const REVIEWER_TIMEOUT_MS = parseInt(process.env.REVIEWER_TIMEOUT_MS ?? String(120_000), 10);
+
+function reviewResponsePath(req: ReviewRequest): string {
+  return `${MARKET}/review_responses/${req.task_id}-${req.agent}-${req.seq}.json`;
+}
+
+function reviewFeeDebited(ledger: Ledger, agent: string, taskId: string, seq: number): boolean {
+  const entry = ledger[agent];
+  if (!entry) return false;
+  return entry.history.some((h) => h.description === `Review fee: ${taskId} #${seq}`);
+}
 
 export async function processReviewRequests(
   ledger: Ledger,
@@ -67,8 +79,17 @@ export async function processReviewRequests(
         continue;
       }
 
-      debitReviewFee(ledger, req.agent, task.review_fee, `Review fee: ${req.task_id} #${req.seq}`);
-      console.log(red(`  review ${req.task_id} #${req.seq}: -${task.review_fee} from ${req.agent}`));
+      if (existsSync(reviewResponsePath(req))) {
+        console.log(dim(`  review ${f}: response already exists, skipping`));
+        continue;
+      }
+
+      if (!reviewFeeDebited(ledger, req.agent, req.task_id, req.seq)) {
+        debitReviewFee(ledger, req.agent, task.review_fee, `Review fee: ${req.task_id} #${req.seq}`);
+        console.log(red(`  review ${req.task_id} #${req.seq}: -${task.review_fee} from ${req.agent}`));
+      } else {
+        console.log(dim(`  review ${req.task_id} #${req.seq}: fee already debited`));
+      }
 
       const result = await runReview(task, req, reviewerToken);
 
@@ -82,7 +103,7 @@ export async function processReviewRequests(
       };
 
       await Bun.write(
-        `${MARKET}/review_responses/${req.task_id}-${req.agent}-${req.seq}.json`,
+        reviewResponsePath(req),
         JSON.stringify(response, null, 2)
       );
 
@@ -146,9 +167,25 @@ async function runReview(
     runTag: `${req.task_id}-${req.agent}-${req.seq}`,
   });
 
-  const output = await new Response(proc.stdout).text();
-  const stderr = await new Response(proc.stderr).text();
-  const exitCode = await proc.exited;
+  let timedOut = false;
+  const timeout = REVIEWER_TIMEOUT_MS > 0 ? setTimeout(() => {
+    timedOut = true;
+    try { proc.kill("SIGTERM"); } catch {}
+    setTimeout(() => { try { proc.kill("SIGKILL"); } catch {} }, 2_000);
+  }, REVIEWER_TIMEOUT_MS) : undefined;
+
+  const [output, stderr, exitCode] = await Promise.all([
+    new Response(proc.stdout as ReadableStream<Uint8Array>).text(),
+    new Response(proc.stderr as ReadableStream<Uint8Array>).text(),
+    proc.exited,
+  ]).finally(() => { if (timeout) clearTimeout(timeout); });
+
+  if (timedOut) {
+    return {
+      lgtm: false,
+      feedback: `reviewer timeout after ${REVIEWER_TIMEOUT_MS}ms`,
+    };
+  }
 
   if (exitCode !== 0) {
     return {

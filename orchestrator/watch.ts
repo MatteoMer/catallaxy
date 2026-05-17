@@ -370,12 +370,13 @@ function spawnIgnore(args: string[]): void {
 function stopWakeProcess(proc: ReturnType<typeof Bun.spawn>, agent: string, wakeId: string): void {
   const containerName = `catallaxy-agent-${agent}-${wakeId}`;
   try { proc.kill("SIGTERM"); } catch {}
-  spawnIgnore(["docker", "rm", "-f", containerName]);
-  spawnIgnore(["pkill", "-TERM", "-f", containerName]);
+  // Do not run `pkill -f ${containerName}` here: it also matches and can
+  // kill the `docker rm -f ${containerName}` cleanup process, leaving
+  // containers stuck in Created/Running and blocking future wakes.
+  setTimeout(() => spawnIgnore(["docker", "rm", "-f", containerName]), 250);
   setTimeout(() => {
     try { proc.kill("SIGKILL"); } catch {}
     spawnIgnore(["docker", "rm", "-f", containerName]);
-    spawnIgnore(["pkill", "-KILL", "-f", containerName]);
   }, 2000);
 }
 
