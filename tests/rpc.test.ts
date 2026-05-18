@@ -24,6 +24,7 @@ beforeAll(async () => {
   await mkdir(`${workdir}/agents/alice/sandbox`, { recursive: true });
   await mkdir(`${workdir}/agents/bob/sandbox`, { recursive: true });
   await mkdir(`${workdir}/agents/alice/sandbox/work/task-002`, { recursive: true });
+  await mkdir(`${workdir}/agents/alice/sandbox/work/task-003`, { recursive: true });
   await mkdir(`${workdir}/orchestrator/private/history`, { recursive: true });
   await writeFile(`${workdir}/orchestrator/private/audit/.keep`, "").catch(() => {});
   await mkdir(`${workdir}/orchestrator/private/audit`, { recursive: true });
@@ -89,19 +90,23 @@ beforeAll(async () => {
     JSON.stringify({ task_id: "task-003", winner: "alice", payment: 1000, assigned_at: new Date().toISOString() })
   );
 
-  const sourceRepo = `${workdir}/agents/alice/sandbox/work/task-002`;
-  await writeFile(`${sourceRepo}/README.md`, "source\n");
-  for (const args of [
-    ["init", "-b", "main"],
-    ["config", "user.email", "alice@example.test"],
-    ["config", "user.name", "Alice"],
-    ["add", "README.md"],
-    ["commit", "-m", "init"],
-  ]) {
-    const proc = Bun.spawn(["git", "-C", sourceRepo, ...args], { stdout: "ignore", stderr: "pipe" });
-    const err = await new Response(proc.stderr).text();
-    if (await proc.exited) throw new Error(`git ${args.join(" ")} failed: ${err}`);
-  }
+  const initWorkRepo = async (repo: string, extraArgs: string[][] = []) => {
+    await writeFile(`${repo}/README.md`, "source\n");
+    for (const args of [
+      ["init", "-b", "main"],
+      ["config", "user.email", "alice@example.test"],
+      ["config", "user.name", "Alice"],
+      ["add", "README.md"],
+      ["commit", "-m", "init"],
+      ...extraArgs,
+    ]) {
+      const proc = Bun.spawn(["git", "-C", repo, ...args], { stdout: "ignore", stderr: "pipe" });
+      const err = await new Response(proc.stderr).text();
+      if (await proc.exited) throw new Error(`git ${args.join(" ")} failed: ${err}`);
+    }
+  };
+  await initWorkRepo(`${workdir}/agents/alice/sandbox/work/task-002`, [["checkout", "-b", "feature/task-002"]]);
+  await initWorkRepo(`${workdir}/agents/alice/sandbox/work/task-003`);
 
   process.env.MARKET_DIR = `${workdir}/market`;
   process.env.AGENTS_DIR = `${workdir}/agents`;
@@ -348,6 +353,30 @@ describe("RPC end-to-end", () => {
       params: { key: "big.md", mode: "replace", content: "x".repeat(40000) },
     });
     expect(tooLarge.error.message).toContain("content too large");
+  });
+
+  test("request_review rejects missing or base branches", async () => {
+    const { setWakeScope, clearWakeScope } = await import("../orchestrator/rpc/methods");
+    setWakeScope("alice", { kind: "work", taskId: "task-003" });
+    try {
+      const missing = await rpc({
+        id: 112,
+        method: "request_review",
+        auth: aliceTok,
+        params: { task_id: "task-003", branch: "does-not-exist" },
+      });
+      expect(missing.error.message).toContain("not found");
+
+      const base = await rpc({
+        id: 113,
+        method: "request_review",
+        auth: aliceTok,
+        params: { task_id: "task-003", branch: "main" },
+      });
+      expect(base.error.message).toContain("must differ from base branch");
+    } finally {
+      clearWakeScope("alice");
+    }
   });
 
   test("request_review rejects duplicate pending requests", async () => {

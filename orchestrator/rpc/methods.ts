@@ -101,6 +101,14 @@ async function writeJson(path: string, data: unknown): Promise<void> {
   await writeFile(path, JSON.stringify(data, null, 2));
 }
 
+async function gitRefExists(workDir: string, ref: string): Promise<boolean> {
+  const proc = Bun.spawn(["git", "-C", workDir, "rev-parse", "--verify", "--quiet", `${ref}^{commit}`], {
+    stdout: "ignore",
+    stderr: "ignore",
+  });
+  return await proc.exited === 0;
+}
+
 async function listJson(dir: string): Promise<string[]> {
   try {
     return (await readdir(dir)).filter((f) => f.endsWith(".json"));
@@ -575,6 +583,11 @@ export async function request_review(agent: string, params: any): Promise<{ requ
   try { task = TaskSchema.parse(await readJson(`${MARKET}/tasks/${taskId}.json`)); }
   catch { throw new Error(`task ${taskId} not found`); }
   if (task.status !== "assigned") throw new Error(`cannot request review for ${taskId}; task is ${task.status}`);
+  if (branch === task.base_branch) throw new Error(`review branch must differ from base branch '${task.base_branch}'`);
+  const workDir = workDirFor(agent, taskId);
+  if (!await gitRefExists(workDir, branch)) {
+    throw new Error(`review branch '${branch}' not found in ${workDir}; create the branch before requesting review`);
+  }
   const requestFiles = (await listJson(`${MARKET}/review_requests`))
     .filter((f) => f.startsWith(`${taskId}-${agent}-`));
   let latestRequestSeq = 0;
