@@ -7,6 +7,8 @@ export interface PretrainTaskTemplate {
   check: string;
   description: string;
   subjectiveCriteria: string;
+  /** Source git repo to clone for the task. Defaults to repos/playground. */
+  repo?: string;
 }
 
 interface TaskSpec {

@@ -27,7 +27,7 @@
  * new task/assignment files and debit review fees.
  *
  * Usage:
- *   bun orchestrator/pretrain.ts [--n 8] [--list-tasks] [agent ...]
+ *   bun orchestrator/pretrain.ts [--n 8] [--light] [--list-tasks] [agent ...]
  */
 
 import { existsSync } from "node:fs";
@@ -64,10 +64,16 @@ import {
 import {
   DEFAULT_PRETRAIN_TASKS_PER_AGENT,
   MIN_PRETRAIN_RESERVATION,
-  PRETRAIN_TASKS as TEMPLATES,
+  PRETRAIN_TASKS as HARD_TEMPLATES,
   type PretrainTaskTemplate as Template,
 } from "./pretrainTasks";
 import { ensurePretrainFixtures } from "./pretrainFixtures";
+import {
+  DEFAULT_LIGHT_PRETRAIN_TASKS_PER_AGENT,
+  LIGHT_PRETRAIN_TASKS,
+  MIN_LIGHT_PRETRAIN_RESERVATION,
+} from "./pretrainLightTasks";
+import { ensureLightPretrainFixtures } from "./pretrainLightFixtures";
 
 const ROOT = process.cwd();
 const MARKET = `${ROOT}/market`;
@@ -81,10 +87,46 @@ const PRETRAIN_WAKE_TIMEOUT_MS = parseInt(
   10
 );
 
+type PretrainMode = "hard" | "light";
+
 interface PretrainArgs {
   n: number;
   agents: string[];
   listTasks: boolean;
+  mode: PretrainMode;
+}
+
+interface PretrainCatalog {
+  mode: PretrainMode;
+  label: string;
+  adjective: string;
+  tasks: readonly Template[];
+  defaultTasksPerAgent: number;
+  minReservation: number;
+  ensureFixtures: (tasks: readonly Template[]) => Promise<void>;
+}
+
+function catalogForMode(mode: PretrainMode): PretrainCatalog {
+  if (mode === "light") {
+    return {
+      mode,
+      label: "light",
+      adjective: "small existing-repo",
+      tasks: LIGHT_PRETRAIN_TASKS,
+      defaultTasksPerAgent: DEFAULT_LIGHT_PRETRAIN_TASKS_PER_AGENT,
+      minReservation: MIN_LIGHT_PRETRAIN_RESERVATION,
+      ensureFixtures: ensureLightPretrainFixtures,
+    };
+  }
+  return {
+    mode,
+    label: "hard",
+    adjective: "hard real-life",
+    tasks: HARD_TEMPLATES,
+    defaultTasksPerAgent: DEFAULT_PRETRAIN_TASKS_PER_AGENT,
+    minReservation: MIN_PRETRAIN_RESERVATION,
+    ensureFixtures: ensurePretrainFixtures,
+  };
 }
 
 function parsePositiveInt(value: string | undefined, name: string): number {
@@ -95,33 +137,44 @@ function parsePositiveInt(value: string | undefined, name: string): number {
 }
 
 function parseArgs(argv: string[]): PretrainArgs {
-  let n = DEFAULT_PRETRAIN_TASKS_PER_AGENT;
+  let mode: PretrainMode = "hard";
+  let n: number | undefined;
   let listTasks = false;
+  let showHelp = false;
   const agents: string[] = [];
   for (let i = 0; i < argv.length; i++) {
     if (argv[i] === "--n") n = parsePositiveInt(argv[++i], "--n");
+    else if (argv[i] === "--light") mode = "light";
+    else if (argv[i] === "--hard") mode = "hard";
     else if (argv[i] === "--list-tasks") listTasks = true;
-    else if (argv[i] === "-h" || argv[i] === "--help") {
-      console.log(`Usage: bun orchestrator/pretrain.ts [--n ${DEFAULT_PRETRAIN_TASKS_PER_AGENT}] [--list-tasks] [agent ...]
-
-  --n N            unique dry-run tasks per agent (default ${DEFAULT_PRETRAIN_TASKS_PER_AGENT})
-  --list-tasks     print the pretrain task catalog and exit
-  agent ...        optional agent names to pretrain (default: all agents)
-
-Pool: ${TEMPLATES.length} hard real-life tasks; reservations are all >= ${MIN_PRETRAIN_RESERVATION.toLocaleString("en-US")}.`);
-      process.exit(0);
-    } else if (argv[i].startsWith("-")) {
+    else if (argv[i] === "-h" || argv[i] === "--help") showHelp = true;
+    else if (argv[i].startsWith("-")) {
       throw new Error(`unknown option: ${argv[i]}`);
     } else {
       agents.push(argv[i]);
     }
   }
-  return { n, agents, listTasks };
+
+  const catalog = catalogForMode(mode);
+  if (showHelp) {
+    console.log(`Usage: bun orchestrator/pretrain.ts [--n ${catalog.defaultTasksPerAgent}] [--light|--hard] [--list-tasks] [agent ...]
+
+  --n N            unique dry-run tasks per agent (default: hard ${DEFAULT_PRETRAIN_TASKS_PER_AGENT}, light ${DEFAULT_LIGHT_PRETRAIN_TASKS_PER_AGENT})
+  --light          use small existing-git-project maintenance tasks
+  --hard           use the full production-grade build-task catalog (default)
+  --list-tasks     print the selected pretrain task catalog and exit
+  agent ...        optional agent names to pretrain (default: all agents)
+
+Selected pool: ${catalog.tasks.length} ${catalog.adjective} tasks; reservations are all >= ${catalog.minReservation.toLocaleString("en-US")}.`);
+    process.exit(0);
+  }
+
+  return { n: n ?? catalog.defaultTasksPerAgent, agents, listTasks, mode };
 }
 
-function printTaskCatalog(): void {
-  console.log(`Pretrain task catalog: ${TEMPLATES.length} unique hard tasks`);
-  for (const [i, t] of TEMPLATES.entries()) {
+function printTaskCatalog(catalog: PretrainCatalog): void {
+  console.log(`Pretrain ${catalog.label} task catalog: ${catalog.tasks.length} unique ${catalog.adjective} tasks`);
+  for (const [i, t] of catalog.tasks.entries()) {
     console.log(`${String(i + 1).padStart(2, "0")}. ${t.slug} [${t.domain}] reservation=${t.reservation.toLocaleString("en-US")} check=\`${t.check}\``);
     console.log(`    ${t.title}`);
   }
@@ -249,9 +302,9 @@ async function saveReservations(reservations: Record<string, number>): Promise<v
   await Bun.write(RESERVATIONS_PATH, JSON.stringify(reservations, null, 2));
 }
 
-async function setReservation(taskId: string, reservation: number): Promise<void> {
-  if (!Number.isInteger(reservation) || reservation < MIN_PRETRAIN_RESERVATION) {
-    throw new Error(`${taskId}: reservation must be >= ${MIN_PRETRAIN_RESERVATION}`);
+async function setReservation(taskId: string, reservation: number, minReservation: number): Promise<void> {
+  if (!Number.isInteger(reservation) || reservation < minReservation) {
+    throw new Error(`${taskId}: reservation must be >= ${minReservation}`);
   }
   const reservations = await loadReservations();
   reservations[taskId] = reservation;
@@ -738,7 +791,7 @@ async function finishCurrentAssignments(agent: string, ledger: Ledger, tokens: T
 }
 
 function pretrainSlugFromDescription(description: string): string | null {
-  return description.match(/^\[pretrain:([^\]]+)\]/)?.[1] ?? null;
+  return description.match(/^\[(?:pretrain|pretrain-light):([^\]]+)\]/)?.[1] ?? null;
 }
 
 async function usedPretrainSlugs(): Promise<Set<string>> {
@@ -754,9 +807,9 @@ async function usedPretrainSlugs(): Promise<Set<string>> {
   return used;
 }
 
-function nextUnusedTemplate(used: Set<string>, cursor: { value: number }): Template | null {
-  while (cursor.value < TEMPLATES.length) {
-    const tpl = TEMPLATES[cursor.value++];
+function nextUnusedTemplate(templates: readonly Template[], used: Set<string>, cursor: { value: number }): Template | null {
+  while (cursor.value < templates.length) {
+    const tpl = templates[cursor.value++];
     if (used.has(tpl.slug)) continue;
     used.add(tpl.slug);
     return tpl;
@@ -768,7 +821,8 @@ async function pretrainOne(
   agent: string,
   template: Template,
   ledger: Ledger,
-  tokens: TokenMap
+  tokens: TokenMap,
+  minReservation: number
 ): Promise<void> {
   const taskId = await nextTaskId();
   const now = new Date();
@@ -777,7 +831,7 @@ async function pretrainOne(
   let openTask: Task = TaskSchema.parse({
     id: taskId,
     description: template.description,
-    repo: PLAYGROUND,
+    repo: template.repo ?? PLAYGROUND,
     base_branch: "main",
     review_fee: template.reviewFee,
     deterministic_checks: checks,
@@ -788,7 +842,7 @@ async function pretrainOne(
     deadline_at: new Date(now.getTime() + 2 * 60_000).toISOString(),
   });
   await Bun.write(`${MARKET}/tasks/${taskId}.json`, JSON.stringify(openTask, null, 2));
-  await setReservation(taskId, template.reservation);
+  await setReservation(taskId, template.reservation, minReservation);
 
   console.log(yellow(`dry-run ${taskId} (${template.slug}/${template.domain}, reserve ${template.reservation.toLocaleString()}) → ${agent} [bidding]`));
 
@@ -881,10 +935,11 @@ async function pretrainOne(
 }
 
 async function main(): Promise<void> {
-  const { n, agents: requestedAgents, listTasks } = parseArgs(process.argv.slice(2));
+  const { n, agents: requestedAgents, listTasks, mode } = parseArgs(process.argv.slice(2));
+  const catalog = catalogForMode(mode);
 
   if (listTasks) {
-    printTaskCatalog();
+    printTaskCatalog(catalog);
     return;
   }
 
@@ -893,10 +948,10 @@ async function main(): Promise<void> {
     process.exit(1);
   }
 
-  console.log(bold(`Pretrain: ${n} unique hard task(s) per agent; each task runs until LGTM`));
-  console.log(dim(`Pool: ${TEMPLATES.length} tasks, min reservation ${MIN_PRETRAIN_RESERVATION.toLocaleString()}, reset balance ${DEFAULT_STARTING_BALANCE.toLocaleString()}`));
+  console.log(bold(`Pretrain (${catalog.label}): ${n} unique ${catalog.adjective} task(s) per agent; each task runs until LGTM`));
+  console.log(dim(`Pool: ${catalog.tasks.length} tasks, min reservation ${catalog.minReservation.toLocaleString()}, reset balance ${DEFAULT_STARTING_BALANCE.toLocaleString()}`));
   await ensureMarketDirs();
-  await ensurePretrainFixtures(TEMPLATES);
+  await catalog.ensureFixtures(catalog.tasks);
 
   const discoveredAgents = await discoverAgents();
   const agents = requestedAgents.length ? requestedAgents : discoveredAgents;
@@ -949,12 +1004,12 @@ async function main(): Promise<void> {
     outer: for (let i = 0; i < n; i++) {
       for (const agent of agents) {
         await finishCurrentAssignments(agent, ledger, tokens);
-        const tpl = nextUnusedTemplate(used, cursor);
+        const tpl = nextUnusedTemplate(catalog.tasks, used, cursor);
         if (!tpl) {
           console.log(yellow("No unused pretrain templates remain; stopping."));
           break outer;
         }
-        await pretrainOne(agent, tpl, ledger, tokens);
+        await pretrainOne(agent, tpl, ledger, tokens, catalog.minReservation);
       }
     }
     completed = true;

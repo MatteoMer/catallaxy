@@ -18,6 +18,7 @@
     "create-agent": "bun orchestrator/create-agent.ts",
     "create-task": "bun orchestrator/create-task.ts",
     "pretrain": "make image-if-needed && bun orchestrator/pretrain.ts",
+    "pretrain-light": "make image-if-needed && bun orchestrator/pretrain.ts --light",
     "reset": "bun orchestrator/reset.ts",
     "image": "docker/build.sh",
     "test": "bun test"
