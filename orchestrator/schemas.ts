@@ -18,7 +18,7 @@ export const TaskSchema = z.object({
   subjective_criteria: z.string().optional(),
   status: z.enum(["open", "assigned", "completed", "expired"]),
   posted_by: z.string(),
-  /** Agent that funded/created this task, if any. Public; reservation/escrow stays private. */
+  /** Agent that funded/created this task, if any. Public; escrow state stays private. */
   creator: z.string().optional(),
   /** Optional parent task this was split out of by an agent. */
   parent_task_id: z.string().optional(),

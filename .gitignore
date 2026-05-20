@@ -16,11 +16,17 @@ market/review_responses/
 market/pending_summaries/
 
 # Per-agent runtime state (template scaffolding tracked)
+agents/*/.pi-config/
 agents/*/sandbox/balance.json
 !agents/_template/sandbox/balance.json
+agents/*/sandbox/identity.json
+!agents/_template/sandbox/identity.json
+!agents/alice/sandbox/identity.json
+!agents/bob/sandbox/identity.json
 agents/*/sandbox/memory/
 agents/*/sandbox/work/
 agents/*/sandbox/.cache/
+agents/*/sandbox/.config/
 # Sandbox symlinks regenerated at runtime
 agents/*/sandbox/SYSTEM.md
 agents/*/sandbox/market

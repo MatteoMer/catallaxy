@@ -223,7 +223,7 @@ function printTrace(t: TraceData): void {
   console.log(`  deadline    ${fmtTime(t.task.deadline_at)} (${relTime(t.task.deadline_at)})`);
   console.log(`  repo        ${t.task.repo} @ ${t.task.base_branch}`);
   console.log(`  review_fee  ${money(t.task.review_fee)}`);
-  console.log(`  reservation ${t.reservation === null ? "missing" : `${money(t.reservation)} (private)`}`);
+  console.log(`  reservation ${t.reservation === null ? "missing" : money(t.reservation)}`);
   if (t.task.deterministic_checks.length) {
     console.log(`  checks`);
     for (const c of t.task.deterministic_checks) {

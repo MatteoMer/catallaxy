@@ -380,7 +380,7 @@ function fmtRel(ms: number): string {
 const listTasksTool = defineTool({
   name: "list_tasks",
   label: "List open auctions",
-  description: "List currently open catallaxy auctions you can bid on. Returns id, time-to-deadline, review_fee, and description.",
+  description: "List currently open catallaxy auctions you can bid on. Returns id, time-to-deadline, review_fee, reservation, and description.",
   parameters: Type.Object({}),
   async execute() {
     const { tasks } = await rpc().call("list_tasks");
@@ -392,7 +392,8 @@ const listTasksTool = defineTool({
     for (const t of tasks) {
       const ms = new Date(t.deadline_at).getTime() - now;
       const tl = ms < 0 ? `expired ${fmtRel(ms)} ago` : `settles in ${fmtRel(ms)}`;
-      lines.push(`- ${t.id} | ${tl} | review_fee ${t.review_fee} | ${t.description}`);
+      const reservation = t.reservation == null ? "missing" : t.reservation;
+      lines.push(`- ${t.id} | ${tl} | review_fee ${t.review_fee} | reservation ${reservation} | ${t.description}`);
     }
     return { content: [{ type: "text", text: lines.join("\n") }], details: { count: tasks.length } };
   },
@@ -401,7 +402,7 @@ const listTasksTool = defineTool({
 const taskInfoTool = defineTool({
   name: "task_info",
   label: "Task details",
-  description: "Full details of a single task: description, repo, base_branch, review_fee, deterministic_checks, subjective_criteria, deadline.",
+  description: "Full details of a single task: description, repo, base_branch, review_fee, reservation, deterministic_checks, subjective_criteria, deadline.",
   parameters: Type.Object({
     task_id: Type.String({ description: "The task ID, e.g. 'task-001'" }),
   }),
@@ -417,7 +418,7 @@ const taskInfoTool = defineTool({
 const placeBidTool = defineTool({
   name: "place_bid",
   label: "Place a bid",
-  description: "Place or update a bid on an open auction. PRICE is your declared minimum acceptable payment / cost estimate. Reverse Vickrey: lowest valid bidder wins, but payment after LGTM is the second-lowest valid bid, or the private reservation if there is only one valid bid. This tool is the ONLY way to bid — narrating 'I bid X' in text does nothing.",
+  description: "Place or update a bid on an open auction. PRICE is your declared minimum acceptable payment / cost estimate. Reverse Vickrey: lowest valid bidder wins, but payment after LGTM is the second-lowest valid bid, or the visible reservation if there is only one valid bid. This tool is the ONLY way to bid — narrating 'I bid X' in text does nothing.",
   parameters: Type.Object({
     task_id: Type.String({ description: "The task ID to bid on, e.g. 'task-001'" }),
     price: Type.Integer({ minimum: 1, description: "Bid price in tokens (positive integer)" }),
@@ -679,7 +680,7 @@ const memoryReadTool = defineTool({
     const key = validateMemoryKey(params.key);
     await assertSafeMemoryAncestors(ctx.cwd, key);
     const tool = createReadTool(ctx.cwd);
-    return tool.execute(id, { path: memoryRelPath(key), offset: params.offset, limit: params.limit }, signal, onUpdate, ctx);
+    return tool.execute(id, { path: memoryRelPath(key), offset: params.offset, limit: params.limit }, signal, onUpdate);
   },
 });
 
@@ -697,7 +698,7 @@ const memoryWriteTool = defineTool({
     if (bytes > MEMORY_WRITE_MAX_BYTES) throw new Error(`content too large; max write is ${MEMORY_WRITE_MAX_BYTES} bytes`);
     await assertSafeMemoryAncestors(ctx.cwd, key);
     const tool = createWriteTool(ctx.cwd);
-    return tool.execute(id, { path: memoryRelPath(key), content: params.content }, signal, onUpdate, ctx);
+    return tool.execute(id, { path: memoryRelPath(key), content: params.content }, signal, onUpdate);
   },
 });
 
@@ -713,10 +714,10 @@ const memoryEditTool = defineTool({
     })),
   }),
   prepareArguments(args) {
-    if (!args || typeof args !== "object") return args;
+    if (!args || typeof args !== "object") return args as { key: string; edits: { oldText: string; newText: string }[] };
     const input = args as { key?: unknown; edits?: Array<{ oldText: string; newText: string }>; oldText?: unknown; newText?: unknown };
-    if (typeof input.oldText !== "string" || typeof input.newText !== "string") return args;
-    return { ...input, edits: [...(input.edits ?? []), { oldText: input.oldText, newText: input.newText }] };
+    if (typeof input.oldText !== "string" || typeof input.newText !== "string") return args as { key: string; edits: { oldText: string; newText: string }[] };
+    return { ...input, edits: [...(input.edits ?? []), { oldText: input.oldText, newText: input.newText }] } as { key: string; edits: { oldText: string; newText: string }[] };
   },
   async execute(id, params, signal, onUpdate, ctx) {
     const key = validateMemoryKey(params.key);
@@ -725,7 +726,7 @@ const memoryEditTool = defineTool({
     if (replacementBytes > MEMORY_WRITE_MAX_BYTES) throw new Error(`replacement text too large; max is ${MEMORY_WRITE_MAX_BYTES} bytes`);
     await assertSafeMemoryAncestors(ctx.cwd, key);
     const tool = createEditTool(ctx.cwd);
-    return tool.execute(id, { path: memoryRelPath(key), edits: params.edits }, signal, onUpdate, ctx);
+    return tool.execute(id, { path: memoryRelPath(key), edits: params.edits }, signal, onUpdate);
   },
 });
 
@@ -751,7 +752,7 @@ const memoryDeleteTool = defineTool({
   },
 });
 
-const myBalanceTool = defineTool({
+const myBalanceTool = defineTool<any, { balance?: number; error?: string }>({
   name: "my_balance",
   label: "Token balance",
   description: "Show your current token balance.",

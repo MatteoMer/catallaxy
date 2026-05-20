@@ -297,6 +297,7 @@ function clampPositiveInt(value: unknown, fallback: number, max: number): number
 export async function list_tasks(agent: string, _params: unknown): Promise<{ tasks: any[] }> {
   const scope = wakeScope(agent);
   if (scope?.kind === "work") throw new Error("list_tasks is disabled during work wakes");
+  const reservations = await loadReservations();
   const out: any[] = [];
   for (const f of await listJson(`${MARKET}/tasks`)) {
     try {
@@ -306,6 +307,7 @@ export async function list_tasks(agent: string, _params: unknown): Promise<{ tas
           id: t.id,
           deadline_at: t.deadline_at,
           review_fee: t.review_fee,
+          reservation: reservations[t.id] ?? null,
           description: t.description,
         });
       }
@@ -324,7 +326,8 @@ export async function task_info(agent: string, params: any): Promise<any> {
     return { task: null };
   }
   assertTaskInfoAllowed(agent, taskId, t.status);
-  return { task: t };
+  const reservations = await loadReservations();
+  return { task: { ...t, reservation: reservations[t.id] ?? null } };
 }
 
 export async function my_assignments(agent: string, _params: unknown): Promise<{ assignments: any[] }> {

@@ -2,8 +2,9 @@
  * Per-agent pi config (models.json) generation.
  *
  * Pi reads provider overrides from `${PI_CODING_AGENT_DIR}/models.json`.
- * We point the openrouter provider at the gateway-backed proxy so all
- * model traffic flows through the orchestrator.
+ * We point the openrouter provider at the host-side proxy (directly in
+ * dev-server mode, through catallaxy-gateway in secure mode) so all model
+ * traffic flows through the orchestrator.
  *
  * The config dir is mounted into the container as read-only, separate
  * from the agent's writable /sandbox, so the agent's bash can't
@@ -11,9 +12,11 @@
  */
 
 import { mkdir, writeFile } from "node:fs/promises";
+import { resolve } from "node:path";
+import { proxyBaseUrl } from "../sandboxProfile";
 
 const ROOT = process.cwd();
-const AGENTS_DIR = process.env.AGENTS_DIR ?? `${ROOT}/agents`;
+const AGENTS_DIR = process.env.AGENTS_DIR ? resolve(process.env.AGENTS_DIR) : `${ROOT}/agents`;
 
 export function configDirFor(agent: string): string {
   return `${AGENTS_DIR}/${agent}/.pi-config`;
@@ -22,8 +25,9 @@ export function configDirFor(agent: string): string {
 /**
  * Write per-agent pi config.
  *
- * `baseUrl` points at the egress gateway (which forwards to the
- * host's proxy). The auth token is delivered via pi's `--api-key`
+ * `baseUrl` points at the orchestrator proxy. In secure mode this is the
+ * egress gateway; in dev-server mode it is host.docker.internal. The auth
+ * token is delivered via pi's `--api-key`
  * flag — pi forwards it as `Authorization: Bearer <token>` and the
  * proxy maps that back to the agent before injecting the real key.
  * No custom headers needed in models.json.
@@ -34,7 +38,7 @@ export async function writeAgentConfig(agent: string, _authToken: string): Promi
   const config = {
     providers: {
       openrouter: {
-        baseUrl: `http://catallaxy-gateway:8443/openrouter/api/v1`,
+        baseUrl: `${proxyBaseUrl()}/openrouter/api/v1`,
       },
     },
   };

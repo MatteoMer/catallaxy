@@ -45,14 +45,14 @@ Flow:
    - deterministic commands the reviewer must run for that checkpoint
    - reviewer prompt/rubric
    - implementation prompt shown to Catallaxy agents
-   - reservation/review fee economics (auction deadline is fixed at 6 minutes)
+   - reservation/review fee economics (auction deadline is fixed at 6 minutes; reservation is visible to bidding agents)
 4. Call catallaxy_finalize_campaign_plan. This shows the full campaign plan to the user for approval. If rejected, refine the plan; do not write files.
 5. After approval, write every planned checkpoint test/support file into the private staging paths returned by the tool. Preserve the repo-relative path under each checkpoint's staging directory. Do not implement the product code.
 6. Call catallaxy_launch_campaign only after all staged files exist. The launcher copies checkpoint 1 into the campaign worktree, commits it, and posts the first market task. Later checkpoints are posted automatically after LGTM. Later checkpoint tasks automatically include prior deterministic checks too. After the final checkpoint, Catallaxy fast-forwards the user's original checkout to the completed campaign branch when safe.
 
 Important constraints:
 - The interface must optimize reviewer clarity: objective tests + explicit reviewer prompt.
-- Do not leak private reservation logic in implementation prompts beyond the chosen public task terms.
+- The reservation itself is public to bidding agents; do not leak hidden planning rationale beyond the chosen public task terms.
 - Before approval, write/edit/launch are blocked by the interface and bash is read-only. Do not try to mutate files before approval.
 - After approval, write only the staged files returned by catallaxy_finalize_campaign_plan. The original user checkout is never mutated by the interface.`;
 
@@ -107,8 +107,8 @@ const checkpointSchema = Type.Object({
   testFiles: Type.Array(Type.String(), { description: "Repo-relative test files staged for this checkpoint" }),
   deterministicChecks: Type.Array(Type.String(), { description: "Commands reviewer/Catallaxy agents must run for this checkpoint" }),
   reviewerPrompt: Type.String({ description: "Prompt/rubric for reviewer acceptance for this checkpoint" }),
-  implementationPrompt: Type.String({ description: "Prompt shown to Catallaxy agents for this checkpoint; no private reservation reasoning" }),
-  reservation: Type.Optional(Type.Number({ description: "Private max payment in tokens; default campaign reservation or 500000" })),
+  implementationPrompt: Type.String({ description: "Prompt shown to Catallaxy agents for this checkpoint; no hidden planning rationale" }),
+  reservation: Type.Optional(Type.Number({ description: "Max payment/reservation in tokens exposed to bidding agents; default campaign reservation or 500000" })),
   reviewFee: Type.Optional(Type.Number({ description: "Review fee in tokens; default campaign reviewFee or 2000" })),
 });
 
@@ -129,7 +129,7 @@ const finalizeCampaignTool = defineTool({
     repo: Type.Optional(Type.String({ description: "Original user repo path; defaults to the repo where catallaxy was launched" })),
     baseBranch: Type.Optional(Type.String({ description: "Campaign base branch; default catallaxy/campaign/<id>/base" })),
     checkpoints: Type.Array(checkpointSchema, { description: "Ordered checkpoints. One checkpoint is valid for atomic work." }),
-    reservation: Type.Optional(Type.Number({ description: "Default private max payment per checkpoint in tokens; default 500000" })),
+    reservation: Type.Optional(Type.Number({ description: "Default max payment/reservation per checkpoint in tokens exposed to bidding agents; default 500000" })),
     reviewFee: Type.Optional(Type.Number({ description: "Default review fee per checkpoint in tokens; default 2000" })),
   }),
   async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
@@ -160,7 +160,8 @@ const finalizeCampaignTool = defineTool({
     };
   },
   renderResult(result, _options, theme) {
-    const plan = result.details?.plan as CampaignPlanRecord | undefined;
+    const details = result.details as { plan?: CampaignPlanRecord } | undefined;
+    const plan = details?.plan;
     if (!plan) return new Text(result.content?.[0]?.type === "text" ? result.content[0].text : "", 0, 0);
     return new Text([
       theme.fg("toolTitle", theme.bold(`Campaign plan ${plan.campaignId}`)),
@@ -207,8 +208,9 @@ const launchCampaignTool = defineTool({
     };
   },
   renderResult(result, _options, theme) {
-    const launched = result.details?.launched as { taskId: string; campaignId: string; checkpointIndex: number } | undefined;
-    const plan = result.details?.plan as CampaignPlanRecord | undefined;
+    const details = result.details as { launched?: { taskId: string; campaignId: string; checkpointIndex: number }; plan?: CampaignPlanRecord } | undefined;
+    const launched = details?.launched;
+    const plan = details?.plan;
     if (!launched) return new Text(result.content?.[0]?.type === "text" ? result.content[0].text : "", 0, 0);
     return new Text([
       theme.fg("success", theme.bold(`Launched ${launched.taskId}`)),

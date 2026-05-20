@@ -424,7 +424,7 @@ export async function startProxyServer(tokens: TokenMap): Promise<ProxyServerHan
   // reviewer but not break agents.
   UPSTREAMS[0].apiKey();
   const server: Server = createServer((req, res) => handleRequest(tokens, req, res));
-  server.on("connect", (req, socket, head) => handleConnect(tokens, req, socket, head));
+  server.on("connect", (req, socket, head) => handleConnect(tokens, req, socket as Socket, head));
   server.on("error", (e) => console.error(`[proxy] server error:`, e));
 
   await new Promise<void>((resolve, reject) => {

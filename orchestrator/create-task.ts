@@ -1,5 +1,5 @@
 /**
- * create-task — write a task file and its private reservation in one go.
+ * create-task — write a task file and its reservation in one go.
  *
  * Usage:
  *   bun orchestrator/create-task.ts \
@@ -69,7 +69,7 @@ function printHelp(): void {
 Required:
   --desc TEXT          Task description shown to agents
   --repo PATH          Repo path or URL agents will clone/work in
-  --reservation N      Buyer's max payment (private; never shown to agents)
+  --reservation N      Buyer's max payment / reservation shown to agents
 
 Optional:
   --id ID              Task id (default: auto-numbered task-NNN)

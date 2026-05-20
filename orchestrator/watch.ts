@@ -27,7 +27,7 @@ import { processReviewRequests } from "./reviewer";
 import { reopenUnsolvableAssignments } from "./reopen";
 import { TaskSchema, BidSchema, AssignmentSchema, ReviewRequestSchema, ReviewResponseSchema } from "./schemas";
 import { startRpcServer } from "./rpc/server";
-import { spawnAgent, ensureAgentNetwork } from "./spawnAgent";
+import { spawnAgent, ensureAgentNetwork, effectiveAgentThinking } from "./spawnAgent";
 import { startProxyServer } from "./proxy/server";
 import { writeAgentConfig } from "./proxy/agentConfig";
 import { startGateway, stopGateway } from "./gateway";
@@ -409,6 +409,7 @@ async function runAgent(
 
   const wakeId = `w${++wakeCounter}`;
   const model = process.env.AGENT_MODEL ?? "openrouter/deepseek/deepseek-v4-flash";
+  const thinking = effectiveAgentThinking(model);
   await logEvent({
     type: "wake_start",
     agent,
@@ -416,6 +417,7 @@ async function runAgent(
     kind: plan.kind,
     task_id: plan.taskId,
     model,
+    thinking,
     tools: plan.tools,
   });
   setWakeScope(agent, { kind: plan.kind, taskId: plan.taskId });
@@ -613,7 +615,7 @@ async function runAgent(
   }
   if (buffer.length) await processLine(buffer);
 
-  const stderr = await new Response(proc.stderr).text();
+  const stderr = await new Response(proc.stderr as ReadableStream<Uint8Array>).text();
   const exitCode = await proc.exited;
   if (timeout) clearTimeout(timeout);
   await logEvent({

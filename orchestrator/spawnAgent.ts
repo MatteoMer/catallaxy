@@ -1,17 +1,15 @@
 /**
  * Spawn a sandboxed `pi` process for an agent.
  *
- * The agent runs as uid 1000 inside an unprivileged container with:
- *   - all caps dropped, no-new-privileges, seccomp + apparmor
- *   - read-only root filesystem (tmpfs for /tmp and /home)
- *   - cpu/memory/pid limits
- *   - bind-mounted /sandbox (rw) — the agent's only writable host path
- *   - CATALLAXY_RPC_ADDR points at the gateway-forwarded RPC server
- *   - bind-mounted /pi-config (ro) — pi's models.json points the
- *     openrouter provider at the host-side egress proxy, so model
- *     traffic flows through key injection. Package-manager HTTPS egress
- *     uses the same proxy as an authenticated allowlisted CONNECT tunnel.
- *     The container never sees real upstream API keys.
+ * By default the agent runs in the dev-server profile: still isolated to its
+ * own /sandbox for persistent files, but otherwise usable as a normal dev box
+ * (writable container overlay, larger memory/shm, broad network, and host
+ * Docker socket when available). Set CATALLAXY_SANDBOX_PROFILE=secure for the
+ * older locked-down runtime (read-only rootfs, internal network, proxied
+ * package egress only).
+ *
+ * In both profiles, model traffic still goes through the host-side proxy via
+ * generated /pi-config, so upstream API keys never enter the container.
  *
  * If `BUN_SPAWN_AGENT_DIRECT=1` is set, falls back to direct `pi`
  * spawn for local diagnostics (NOT for production — bypasses every
@@ -19,11 +17,28 @@
  * image is built.
  */
 
-import { existsSync } from "node:fs";
+import { existsSync, mkdirSync, statSync } from "node:fs";
+import { resolve } from "node:path";
 import { configDirFor } from "./proxy/agentConfig";
+import {
+  agentCpuLimit,
+  agentMemoryLimit,
+  agentNetwork,
+  agentPidsLimit,
+  agentShmSize,
+  dockerAccessEnabled,
+  dockerSocketPath,
+  gatewayHost,
+  isDevServerProfile,
+  proxyPort,
+  requireDockerSocket,
+  rpcAddr,
+  secureHomeTmpSize,
+  secureTmpSize,
+} from "./sandboxProfile";
 
 const ROOT = process.cwd();
-const AGENTS_DIR = process.env.AGENTS_DIR ?? `${ROOT}/agents`;
+const AGENTS_DIR = process.env.AGENTS_DIR ? resolve(process.env.AGENTS_DIR) : `${ROOT}/agents`;
 const IMAGE = process.env.CATALLAXY_AGENT_IMAGE ?? "catallaxy-agent:latest";
 const DIRECT_SPAWN = process.env.BUN_SPAWN_AGENT_DIRECT === "1";
 // Custom seccomp profile is opt-in. By default we rely on Docker's
@@ -34,6 +49,32 @@ const CUSTOM_SECCOMP_PATH = process.env.CATALLAXY_SECCOMP === "custom"
   ? `${ROOT}/docker/agent/seccomp.json`
   : null;
 const HARDENING_DISABLED = process.env.CATALLAXY_DISABLE_HARDENING === "1";
+
+export const DEFAULT_AGENT_THINKING = "medium";
+const VALID_THINKING_LEVELS = new Set(["off", "minimal", "low", "medium", "high", "xhigh"]);
+
+function isThinkingLevel(level: string): boolean {
+  return VALID_THINKING_LEVELS.has(level);
+}
+
+export function modelThinkingSuffix(model: string): string | undefined {
+  const idx = model.lastIndexOf(":");
+  if (idx < 0) return undefined;
+  const suffix = model.slice(idx + 1);
+  return isThinkingLevel(suffix) ? suffix : undefined;
+}
+
+export function agentThinking(): string {
+  const level = process.env.AGENT_THINKING ?? DEFAULT_AGENT_THINKING;
+  if (!isThinkingLevel(level)) {
+    throw new Error(`invalid AGENT_THINKING=${JSON.stringify(level)}; expected one of ${[...VALID_THINKING_LEVELS].join(", ")}`);
+  }
+  return level;
+}
+
+export function effectiveAgentThinking(model: string): string {
+  return modelThinkingSuffix(model) ?? agentThinking();
+}
 
 export interface SpawnOpts {
   agent: string;
@@ -47,6 +88,46 @@ export interface SpawnOpts {
   runTag: string;
 }
 
+function dockerSocketArgs(sandbox: string): string[] {
+  if (!dockerAccessEnabled()) return [];
+
+  const socket = dockerSocketPath();
+  if (!existsSync(socket)) {
+    if (requireDockerSocket()) throw new Error(`docker socket missing: ${socket}`);
+    return [];
+  }
+
+  const args: string[] = [];
+  try {
+    const gid = statSync(socket).gid;
+    if (Number.isInteger(gid)) args.push("--group-add", String(gid));
+  } catch {}
+
+  args.push(
+    "-v", `${socket}:/var/run/docker.sock`,
+    // Docker-outside-of-Docker path fix: docker compose running from /sandbox
+    // would otherwise send /sandbox/... bind mounts to the host daemon, where
+    // that path does not exist. The image's docker wrapper cd/re-writes to this
+    // mirrored host path before invoking the real Docker CLI.
+    "-v", `${sandbox}:${sandbox}:rw`,
+    "-e", "DOCKER_HOST=unix:///var/run/docker.sock",
+    "-e", `CATALLAXY_HOST_SANDBOX=${sandbox}`,
+    "-e", "CATALLAXY_CONTAINER_SANDBOX=/sandbox",
+  );
+  return args;
+}
+
+function packageProxy(authToken: string): string {
+  return `http://catallaxy:${authToken}@${gatewayHost()}:${proxyPort()}`;
+}
+
+function devHost(): string {
+  const network = agentNetwork();
+  if (network === "host") return "127.0.0.1";
+  if (network === "catallaxy-agents") return "catallaxy-gateway";
+  return "host.docker.internal";
+}
+
 /**
  * Build the `docker run` argv for an agent. Keeps the call sites in
  * watch.ts and pretrain.ts identical. The pi command is appended at
@@ -55,31 +136,37 @@ export interface SpawnOpts {
 export function buildDockerArgs(opts: SpawnOpts, piArgs: string[]): string[] {
   const sandbox = `${AGENTS_DIR}/${opts.agent}/sandbox`;
   const piConfig = configDirFor(opts.agent);
-  const packageProxy = `http://catallaxy:${opts.authToken}@catallaxy-gateway:8443`;
+  const devServer = isDevServerProfile();
+  const network = agentNetwork();
+  const pkgProxy = packageProxy(opts.authToken);
+  const home = devServer ? "/sandbox" : "/home/catallaxy";
 
   const args: string[] = [
     "docker", "run",
     "--rm", "-i",
     "--name", `catallaxy-agent-${opts.agent}-${opts.runTag}`,
-    "--network", "catallaxy-agents",
+    "--network", network,
+    "--init",
     "--user", "1000:1000",
     "--cap-drop=ALL",
     "--security-opt=no-new-privileges",
-    "--read-only",
-    "--tmpfs", "/tmp:size=100m",
-    "--tmpfs", "/home/catallaxy:size=20m",
-    "--memory=2g",
-    "--cpus=1",
-    // Node + V8 + libuv worker pool + pi extension threads can
-    // easily push past 128. 512 is comfortable for a single agent
-    // wake while still cutting off any fork-bomb behavior.
-    "--pids-limit=512",
-    "--add-host=host.docker.internal:host-gateway",
+    ...(devServer ? [] : [
+      "--read-only",
+      "--tmpfs", `/tmp:size=${secureTmpSize()}`,
+      "--tmpfs", `/home/catallaxy:size=${secureHomeTmpSize()}`,
+    ]),
+    `--memory=${agentMemoryLimit()}`,
+    `--cpus=${agentCpuLimit()}`,
+    "--pids-limit", agentPidsLimit(),
+    `--shm-size=${agentShmSize()}`,
+    "--ulimit", "nofile=1048576:1048576",
+    ...(network === "host" ? [] : ["--add-host=host.docker.internal:host-gateway"]),
     ...(HARDENING_DISABLED || !CUSTOM_SECCOMP_PATH || !existsSync(CUSTOM_SECCOMP_PATH)
       ? []
       : ["--security-opt", `seccomp=${CUSTOM_SECCOMP_PATH}`]),
     ...(HARDENING_DISABLED ? [] : ["--security-opt", "apparmor=docker-default"]),
     "-v", `${sandbox}:/sandbox:rw`,
+    ...dockerSocketArgs(sandbox),
     // Read-only config dir contains models.json (proxy URL),
     // auth.json (empty), settings.json (empty) — written by the
     // orchestrator at startup. Pi sees the dir as PI_CODING_AGENT_DIR
@@ -87,26 +174,23 @@ export function buildDockerArgs(opts: SpawnOpts, piArgs: string[]): string[] {
     // mount is :ro the agent cannot rewrite its own routing.
     "-v", `${piConfig}:/pi-config:ro`,
     "-e", "PI_CODING_AGENT_DIR=/pi-config",
-    "-e", "HOME=/home/catallaxy",
-    // The agent network is --internal; the only host the agent can
-    // reach is the gateway, which forwards :8443/:9443 to the host's
-    // proxy/RPC. Identity is established by the auth token (env)
-    // which the gateway forwards verbatim.
-    "-e", `CATALLAXY_RPC_ADDR=catallaxy-gateway:9443`,
+    "-e", `HOME=${home}`,
+    "-e", `CATALLAXY_RPC_ADDR=${rpcAddr()}`,
     "-e", `CATALLAXY_AUTH_TOKEN=${opts.authToken}`,
-    // Package-manager HTTPS egress (npm/pnpm/yarn/bun, plus any
-    // allowlisted HTTPS fetches) goes through the same authenticated
-    // proxy. Only HTTPS proxy vars are set so pi's plain-http model
-    // baseUrl is not accidentally re-proxied through itself.
-    "-e", `HTTPS_PROXY=${packageProxy}`,
-    "-e", `https_proxy=${packageProxy}`,
-    "-e", `NPM_CONFIG_HTTPS_PROXY=${packageProxy}`,
-    "-e", `npm_config_https_proxy=${packageProxy}`,
-    "-e", "NO_PROXY=catallaxy-gateway,localhost,127.0.0.1",
-    "-e", "no_proxy=catallaxy-gateway,localhost,127.0.0.1",
-    // Keep package-manager caches off the read-only root and out of
-    // the small HOME tmpfs. Persisting per-agent caches also makes
-    // repeated installs cheaper.
+    "-e", `CATALLAXY_DEV_HOST=${devHost()}`,
+    ...(devServer ? [] : [
+      // Package-manager HTTPS egress (npm/pnpm/yarn/bun, plus any
+      // allowlisted HTTPS fetches) goes through the authenticated proxy in
+      // secure mode. Dev-server mode intentionally leaves broad egress alone.
+      "-e", `HTTPS_PROXY=${pkgProxy}`,
+      "-e", `https_proxy=${pkgProxy}`,
+      "-e", `NPM_CONFIG_HTTPS_PROXY=${pkgProxy}`,
+      "-e", `npm_config_https_proxy=${pkgProxy}`,
+      "-e", `NO_PROXY=${gatewayHost()},localhost,127.0.0.1`,
+      "-e", `no_proxy=${gatewayHost()},localhost,127.0.0.1`,
+    ]),
+    // Keep package-manager caches in the persistent sandbox. This avoids
+    // read-only-root issues in secure mode and speeds repeated dev runs.
     "-e", "NPM_CONFIG_CACHE=/sandbox/.cache/npm",
     "-e", "npm_config_cache=/sandbox/.cache/npm",
     "-e", "YARN_CACHE_FOLDER=/sandbox/.cache/yarn",
@@ -140,11 +224,16 @@ export function buildPiArgs(opts: SpawnOpts): string[] {
     "pi",
     "-p", opts.prompt,
     "--model", opts.model,
+  ];
+  if (!modelThinkingSuffix(opts.model)) {
+    args.push("--thinking", agentThinking());
+  }
+  args.push(
     "--api-key", opts.authToken,
     "--mode", "json",
     "--no-session",
     "-e", extensionPath,
-  ];
+  );
   if (opts.tools?.length) args.push("--tools", opts.tools.join(","));
   return args;
 }
@@ -176,6 +265,9 @@ export function spawnAgent(opts: SpawnOpts): ReturnType<typeof Bun.spawn> {
   const sandbox = `${AGENTS_DIR}/${opts.agent}/sandbox`;
   if (!existsSync(sandbox)) {
     throw new Error(`agent sandbox missing: ${sandbox}`);
+  }
+  if (isDevServerProfile()) {
+    mkdirSync(`${sandbox}/.cache`, { recursive: true });
   }
   const piConfig = configDirFor(opts.agent);
   if (!existsSync(`${piConfig}/models.json`)) {
@@ -216,7 +308,7 @@ export function spawnAgent(opts: SpawnOpts): ReturnType<typeof Bun.spawn> {
  * impersonation is not practical.
  */
 export async function ensureAgentNetwork(): Promise<void> {
-  if (DIRECT_SPAWN) return;
+  if (DIRECT_SPAWN || agentNetwork() !== "catallaxy-agents") return;
   const inspect = Bun.spawn(
     ["docker", "network", "inspect", "catallaxy-agents", "--format", "{{.Internal}}"],
     { stdout: "pipe", stderr: "pipe" }

@@ -81,7 +81,10 @@ async function runChildOnce(): Promise<number> {
   console.log(`Catallaxy watcher started (pid ${child.pid}); logging to ${LOG_PATH}`);
 
   const codePromise = child.exited;
-  await Promise.all([pump(child.stdout, "stdout"), pump(child.stderr, "stderr")]);
+  await Promise.all([
+    pump(child.stdout as ReadableStream<Uint8Array>, "stdout"),
+    pump(child.stderr as ReadableStream<Uint8Array>, "stderr"),
+  ]);
   const code = await codePromise;
   const current = await readPid();
   if (current === child.pid) await rm(PID_PATH, { force: true });

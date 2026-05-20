@@ -48,6 +48,8 @@ When the final checkpoint completes, Catallaxy publishes the completed campaign 
 8. The extension copies checkpoint 1 staged files into the campaign worktree, commits them on the campaign base branch, and posts the first market task.
 9. The watcher advances the campaign on LGTM until all checkpoints complete, then fast-forwards the user's original checkout to the completed campaign branch when safe.
 
+Reservation/max-payment values are part of public auction terms exposed to bidding agents through `list_tasks` and `task_info`.
+
 Runtime state:
 
 ```txt

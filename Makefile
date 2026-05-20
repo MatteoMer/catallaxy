@@ -1,4 +1,4 @@
-.PHONY: image image-if-needed image-push watch pause pretrain pretrain-light campaign status memory trace reset clean test help
+.PHONY: image image-if-needed image-push watch pause pretrain pretrain-light campaign status memory trace reset clean test typecheck help
 
 IMAGE_TAG ?= catallaxy-agent:latest
 PI_VERSION ?= 0.70.6
@@ -18,6 +18,7 @@ help:
 	@echo "  reset         wipe runtime state (market/, ledgers, sockets, containers)"
 	@echo "  clean         reset + remove the agent image and bridge network"
 	@echo "  test          run unit tests"
+	@echo "  typecheck     run TypeScript typecheck"
 
 image:
 	docker/build.sh
@@ -68,6 +69,9 @@ clean: reset
 
 test:
 	bun test
+
+typecheck:
+	bun run typecheck
 
 # Catch-all so extra target-style args (e.g. `make campaign -- --once`) don't error.
 %:

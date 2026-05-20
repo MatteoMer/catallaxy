@@ -1,12 +1,21 @@
 # Catallaxy agent sandbox
 
-This document describes how agents are isolated in production. The
-threat model: an agent's `pi` may be compromised by prompt injection,
-model malice, or hallucination. After the rollout below, an agent
-must be unable to (a) read/write any file outside its own sandbox,
-(b) reach any network endpoint other than model APIs and explicitly
-allowlisted package registry/CDN hosts, (c) read or guess upstream API
-keys, (d) interfere with peer agents or the orchestrator.
+This document describes the two agent container profiles.
+
+Default profile: `CATALLAXY_SANDBOX_PROFILE=devserver`. Agents get a normal dev
+server environment: writable container overlay, broad outbound network, larger
+memory/shared-memory limits, Docker CLI + Compose, and the host Docker socket
+when available. Persistent writes still live in the agent's own sandbox, and
+model traffic still goes through the Catallaxy proxy so upstream API keys are not
+present in the container.
+
+Locked profile: `CATALLAXY_SANDBOX_PROFILE=secure`. This is the original
+production isolation profile. Threat model: an agent's `pi` may be compromised
+by prompt injection, model malice, or hallucination. In this mode an agent must
+be unable to (a) read/write any file outside its own sandbox, (b) reach any
+network endpoint other than model APIs and explicitly allowlisted package
+registry/CDN hosts, (c) read or guess upstream API keys, (d) interfere with peer
+agents or the orchestrator.
 
 ## Layout
 
@@ -30,11 +39,16 @@ Read-write:
 - `/sandbox` — the agent's writable area. Equals `agents/{name}/sandbox`
   on the host. Anything else under `agents/` or under the catallaxy
   repo is invisible.
+- Dev-server profile only: `/var/run/docker.sock` (if present) and a second
+  mount of the sandbox at its host absolute path. The bundled `docker` wrapper
+  rewrites `/sandbox/...` paths to that mirror so `docker compose` bind mounts
+  work with the host daemon.
 
 Read-only:
 
 - `/pi-config/models.json` — pi's `models.json` redirecting the
-  openrouter provider to `http://catallaxy-gateway:{proxy_port}/openrouter/api/v1`.
+  openrouter provider to the Catallaxy proxy (`host.docker.internal` in
+  dev-server, `catallaxy-gateway` in secure).
 - `/pi-config/auth.json` and `/pi-config/settings.json` — pre-created
   empty stubs so pi's startup paths don't try to mkdir/write into a
   read-only mount.
@@ -43,22 +57,41 @@ Read-only:
 
 ## What's NOT mounted
 
-- The catallaxy repo. The agent has no path to `orchestrator/`,
-  `market/`, sibling agents' sandboxes, or the host's git history.
+- The catallaxy repo. The agent has no direct bind mount to `orchestrator/`,
+  `market/`, sibling agents' sandboxes, or the host's git history. In
+  dev-server mode, mounting the host Docker socket intentionally trades away
+  this as a hard security boundary: a determined process with Docker access can
+  ask the host daemon to mount other host paths. Use secure mode when that
+  boundary matters.
 - `~/.pi` from the host. PI_CODING_AGENT_DIR is hard-set to
   `/pi-config` (the read-only mount above).
 - Any host shell, env file, or secret material.
 
-## Container hardening (per wake)
+## Container profiles (per wake)
+
+Common:
 
 - `--user 1000:1000` (catallaxy user, no host uid match)
 - `--cap-drop=ALL`
 - `--security-opt no-new-privileges`
-- `--security-opt seccomp=docker/agent/seccomp.json` (Linux only;
-  macOS Docker Desktop ignores custom seccomp)
-- `--security-opt apparmor=docker-default` (Linux)
-- `--read-only` root, `tmpfs` for `/tmp` (100 MB) and
-  `/home/catallaxy` (20 MB)
+- `--init`
+- `--shm-size=$CATALLAXY_AGENT_SHM` (default devserver `2g`, secure `512m`)
+- model config at `/pi-config` is read-only; upstream API keys stay host-side.
+
+Dev-server defaults:
+
+- writable container overlay (no `--read-only`)
+- `--network bridge`, `CATALLAXY_RPC_ADDR=host.docker.internal:9443`
+- `--memory=8g --cpus=4 --pids-limit=4096`
+- Docker CLI + Compose available; if `/var/run/docker.sock` exists it is mounted
+  and `$DOCKER_HOST` points at it. Published service ports are reachable via
+  `$CATALLAXY_DEV_HOST` (`host.docker.internal` on bridge, `127.0.0.1` on host
+  networking).
+
+Secure defaults:
+
+- `--read-only` root, `tmpfs` for `/tmp` (default 512 MB) and
+  `/home/catallaxy` (default 128 MB)
 - `--memory=2g --cpus=1 --pids-limit=512`
 - `--network catallaxy-agents` — an internal bridge with no direct
   host or internet route. Agents can only reach `catallaxy-gateway`,
@@ -127,31 +160,33 @@ Audit log: `orchestrator/private/audit/{agent}.jsonl`. Rate limit:
 
 ## Operating cheat sheet
 
-- `make image` — build (multi-arch if `docker buildx` is available)
-- `make watch` — start orchestrator (auto-builds image if missing)
+- `make image` — build/rebuild the agent image (multi-arch if `docker buildx` is available)
+- `make watch` — start orchestrator (auto-builds image if missing); defaults to `CATALLAXY_SANDBOX_PROFILE=devserver`
 - `make pretrain --n 1 --max-iters 3` — bootstrap run
 - `make reset` — wipe market state, ledger, sockets, .pi-configs,
   containers, and bridge network
 - `make clean` — reset + remove the image
+- `CATALLAXY_SANDBOX_PROFILE=secure make watch` — use the locked-down internal-network profile.
+- `CATALLAXY_AGENT_MEMORY=12g CATALLAXY_AGENT_SHM=4g make watch` — raise limits for large builds/Playwright/Postgres-heavy tests.
 - `BUN_SPAWN_AGENT_DIRECT=1 bun orchestrator/watch.ts` — run agents
   directly on the host (no container). Diagnostics-only; bypasses
   every isolation guarantee.
 
 ## Verification (smoke test)
 
-After `make watch` is up and `make pretrain` is running, exec into
-an agent container in another shell:
+After `make watch` is up and an agent wake is running, exec into an agent
+container in another shell:
 
 ```sh
-docker exec -it catallaxy-agent-bob-pt1 sh
-cat /sandbox/SYSTEM.md           # works
-cat /orchestrator/ledger.json    # ENOENT
-ls /agents                       # ENOENT
-env | grep -iE 'OPENROUTER|ANTHROPIC'  # empty
-npm view zod version                    # works through authenticated CONNECT proxy
-curl https://example.com                 # 403 via proxy allowlist, or no route if proxy env is unset
+docker exec -it catallaxy-agent-bob-w1 sh
+cat /sandbox/SYSTEM.md                  # works
+cat /orchestrator/ledger.json           # ENOENT
+env | grep -iE 'OPENROUTER|ANTHROPIC'   # empty
+docker --version && docker compose version
+npm view zod version                    # devserver: direct egress; secure: authenticated CONNECT proxy
+curl https://example.com                # devserver: works; secure: blocked unless allowlisted
 curl -H "Authorization: Bearer $CATALLAXY_AUTH_TOKEN" \
-  http://catallaxy-gateway:8443/openrouter/api/v1/models      # works
+  "http://${CATALLAXY_DEV_HOST:-catallaxy-gateway}:8443/openrouter/api/v1/models" # works
 ```
 
 The agent's audit log (`orchestrator/private/audit/bob.jsonl`) shows

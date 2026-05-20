@@ -89,6 +89,10 @@ beforeAll(async () => {
     `${workdir}/market/assignments/task-003.json`,
     JSON.stringify({ task_id: "task-003", winner: "alice", payment: 1000, assigned_at: new Date().toISOString() })
   );
+  await writeFile(
+    `${workdir}/orchestrator/private/reservations.json`,
+    JSON.stringify({ "task-001": 999, "task-002": 1000, "task-003": 1000 }, null, 2)
+  );
 
   const initWorkRepo = async (repo: string, extraArgs: string[][] = []) => {
     await writeFile(`${repo}/README.md`, "source\n");
@@ -174,6 +178,13 @@ describe("RPC end-to-end", () => {
     expect(r.id).toBe(1);
     expect(r.result.tasks).toHaveLength(1);
     expect(r.result.tasks[0].id).toBe("task-001");
+    expect(r.result.tasks[0].reservation).toBe(999);
+  });
+
+  test("task_info exposes reservation", async () => {
+    const r = await rpc({ id: 101, method: "task_info", auth: aliceTok, params: { task_id: "task-001" } });
+    expect(r.result.task.id).toBe("task-001");
+    expect(r.result.task.reservation).toBe(999);
   });
 
   test("missing auth → UNAUTHORIZED", async () => {

@@ -1,5 +1,5 @@
 /**
- * Exchange — reverse Vickrey auction with private reservation price.
+ * Exchange — reverse Vickrey auction with a reservation price.
  *
  * Stateless. Reads open tasks past their deadline, picks winner, writes assignment.
  * Last-write-wins per (task, agent) bid file (so agents can revise bids).
@@ -64,8 +64,8 @@ async function readAllInDir<T>(dir: string, schema: { parse: (d: unknown) => T }
 
 /**
  * Reverse Vickrey clearing price: lowest bidder wins, but is paid the
- * second-lowest valid bid. If there is only one valid bid, the private
- * reservation price is the outside option / cap, so the winner is paid it.
+ * second-lowest valid bid. If there is only one valid bid, the reservation
+ * price is the outside option / cap, so the winner is paid it.
  */
 export function clearingPayment(validBids: Pick<Bid, "price">[], reservation: number): number {
   if (validBids.length === 0) throw new Error("clearingPayment requires at least one valid bid");

@@ -28,8 +28,10 @@
  * authenticated allowlisted proxy tunnel.
  *
  * The gateway runs as a long-lived container managed by the
- * watcher; reset.ts removes it.
+ * watcher in secure/internal-network mode; reset.ts removes it.
  */
+
+import { agentNetwork } from "./sandboxProfile";
 
 const ROOT = process.cwd();
 const GATEWAY_NAME = "catallaxy-gateway";
@@ -80,7 +82,7 @@ async function containerExists(): Promise<boolean> {
  * watcher's network IDs.
  */
 export async function startGateway(): Promise<void> {
-  if (DIRECT_SPAWN) return;
+  if (DIRECT_SPAWN || agentNetwork() !== "catallaxy-agents") return;
   if (await containerExists()) {
     await dockerOk(["rm", "-f", GATEWAY_NAME]);
   }
@@ -148,7 +150,7 @@ export async function startGateway(): Promise<void> {
 }
 
 export async function stopGateway(): Promise<void> {
-  if (DIRECT_SPAWN) return;
+  if (DIRECT_SPAWN || agentNetwork() !== "catallaxy-agents") return;
   await dockerOk(["rm", "-f", GATEWAY_NAME]);
 }
 

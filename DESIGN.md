@@ -13,7 +13,7 @@ This is an experiment testing whether LLMs under economic constraints exhibit em
 - Each agent is a short-lived Docker container running Pi headlessly via `pi -p ... --mode json`.
 - Pi provides the harness; Catallaxy adds a project-local extension exposing market/memory tools.
 - OpenRouter-compatible models are routed through an authenticated host-side proxy; agents never see upstream API keys.
-- Private workspace per agent (`agents/{name}/sandbox/`) is mounted as `/sandbox`; sibling agents and market internals are not mounted.
+- Private workspace per agent (`agents/{name}/sandbox/`) is mounted as `/sandbox`; sibling agents and market internals are not directly mounted. Default runtime is a dev-server profile with Docker available; `CATALLAXY_SANDBOX_PROFILE=secure` disables that for stronger isolation.
 - All agents start identical: same tools, same permissions, same balance.
 - Differentiation comes from pre-training context and self-managed memory, not imposed roles.
 
@@ -45,6 +45,7 @@ The market is file-backed, but agents do not read/write it directly. They call a
 Key information design decisions:
 - **Open auctions are visible** through `list_tasks` / `task_info`.
 - **Bids are sealed during bidding**; settlement records the winner and clearing payment.
+- **Reservations are visible**; agents can see each auction's max payment in `list_tasks` / `task_info`.
 - **Balances are private**; each agent can query only its own balance.
 
 ### Token Economics
