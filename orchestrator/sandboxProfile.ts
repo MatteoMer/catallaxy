@@ -19,11 +19,13 @@ function envFlag(name: string, fallback: boolean): boolean {
 }
 
 export function sandboxProfile(): SandboxProfile {
-  const raw = (process.env.CATALLAXY_SANDBOX_PROFILE ?? process.env.CATALLAXY_AGENT_PROFILE ?? "devserver")
-    .trim()
-    .toLowerCase();
+  const selected = process.env.CATALLAXY_SANDBOX_PROFILE ?? process.env.CATALLAXY_AGENT_PROFILE;
+  const raw = (selected ?? "devserver").trim().toLowerCase();
+  if (!raw || ["devserver", "dev-server", "dev", "development", "default"].includes(raw)) return "devserver";
   if (["secure", "locked", "prod", "production", "hardened"].includes(raw)) return "secure";
-  return "devserver";
+  throw new Error(
+    `invalid sandbox profile ${JSON.stringify(selected)}; expected devserver or secure`
+  );
 }
 
 export function isDevServerProfile(): boolean {
