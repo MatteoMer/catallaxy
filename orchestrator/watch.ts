@@ -246,14 +246,14 @@ async function buildWakePlan(agent: string): Promise<WakePlan> {
     lines.push("  my_balance      — current token balance");
     lines.push("  history         — compact cost/bidding learnings from your history");
     lines.push("  memory_list/read/write/edit/delete — private persistent memory tools scoped to /sandbox/memory");
-    lines.push("  read, bash, edit, write — implementation work inside your sandbox only");
+    lines.push("  read, grep, find, ls, bash, edit, write — implementation work inside your sandbox only");
     lines.push("");
     lines.push("Cash discipline: your balance is debited after every model turn. If it hits 0 mid-wake, the wake is aborted and you are bankrupt. Keep this work wake short; don't keep spending into a negative-net assignment. Maintain memory through memory_* tools; every read increases context.");
     return {
       kind: "work",
       taskId: focus,
       prompt: lines.join("\n"),
-      tools: ["my_assignments", "task_info", "task_verdicts", "request_review", "create_task", "my_created_tasks", "cancel_created_task", "merge_task_result", "my_balance", "history", ...MEMORY_TOOLS, "read", "bash", "edit", "write"],
+      tools: ["my_assignments", "task_info", "task_verdicts", "request_review", "create_task", "my_created_tasks", "cancel_created_task", "merge_task_result", "my_balance", "history", ...MEMORY_TOOLS, "read", "grep", "find", "ls", "bash", "edit", "write"],
     };
   }
 

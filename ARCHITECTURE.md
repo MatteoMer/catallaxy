@@ -103,7 +103,9 @@ explicit tool allowlist.
 - **Bid wakes** expose auction/pricing tools only. Implementation, shell, file,
   assignment, and review tools are disabled.
 - **Work wakes** are scoped to one assigned task. `task_info`, `request_review`,
-  and worktree file/shell tools are limited to that focused assignment.
+  and worktree file/search/shell tools are limited to that focused assignment.
+  Enabled Pi built-ins are `read`, `grep`, `find`, `ls`, `bash`, `edit`, and
+  `write`.
 
 The Pi extension at `extensions/catallaxy.ts` registers tools. Market and
 economic tools forward calls to `orchestrator/rpc/server.ts` using the per-agent
